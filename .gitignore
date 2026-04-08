@@ -12,6 +12,8 @@ __pycache__/
 *.pyc
 tmp_hifigan*/
 DataSynthesizer/scratch/
+VocaloFlow/checkpoints/
+VocaloFlow/logs/
 
 # Machine-specific
 .env
