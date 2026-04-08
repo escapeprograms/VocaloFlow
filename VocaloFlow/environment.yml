@@ -1,0 +1,20 @@
+name: vocaloflow
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pytorch>=2.2
+  - pytorch-cuda=12.1
+  - torchaudio
+  - numpy
+  - scipy
+  - matplotlib
+  - tqdm
+  - pandas
+  - pip
+  - pip:
+    - tensorboard
+    - einops

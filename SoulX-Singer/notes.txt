@@ -1,0 +1,52 @@
+cmd.exe /c example\infer.bat
+
+
+
+Run preprocessing script to get a metadata for soulxsinger voice cloning in WSL:
+cd SoulX-Singer
+conda activate soulxsinger
+
+PYTHONPATH=. python -m preprocess.pipeline \
+  --audio_path "PATH/TO/YOUR/YourSample.mp3" \
+  --save_dir "example/transcriptions/YourSample" \
+  --language "English" \
+  --device "cuda" \
+  --vocal_sep True \
+  --max_merge_duration 30000
+
+
+
+
+  PYTHONPATH=. python -m preprocess.pipeline \
+  --audio_path "../WillStetsonSample.mp3" \
+  --save_dir "example/transcriptions/WillStetsonSample" \
+  --language "English" \
+  --device "cuda" \
+  --vocal_sep True \
+  --max_merge_duration 30000
+
+
+  PYTHONPATH=. python -m preprocess.pipeline \
+  --audio_path "../VocalPrompts/Rachie/raw/rachie_high.m4a" \
+  --save_dir "../VocalPrompts/Rachie/rachie_high" \
+  --language "English" \
+  --device "cuda" \
+  --vocal_sep True \
+  --max_merge_duration 30000
+
+
+
+---------------------- Convert metadata to mid -> then put it in the midi editor website to manually fix
+
+  python -m preprocess.tools.midi_parser \
+  --meta2midi \
+  --meta "../VocalPrompts/Rachie/rachie_high/metadata.json" \
+  --midi "../VocalPrompts/Rachie/rachie_high/midi.mid"
+
+---------------------- Convert mid back to metadata
+
+python -m preprocess.tools.midi_parser \
+  --midi2meta \
+  --midi "../VocalPrompts/Rachie/rachie_high/edited_midi.mid" \
+  --meta "../VocalPrompts/Rachie/rachie_high/metadata.json" \
+  --vocal "../VocalPrompts/Rachie/rachie_high/vocal.wav"

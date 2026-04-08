@@ -1,0 +1,32 @@
+1: convert OpenUtau into an audio DONE
+2: Align soulX notes with OpenUtau audio time-wise DONE (?)
+
+If the vocaloid alignment is bad, try these:
+2A:Cost Threshold Filtering
+Instead of using every aligned pair, you calculate the global DTW cost (the total distance of the optimal path)
+and discard pairs that exceed a certain threshold.
+
+2B:Phoneme-Level Alignment Constraints
+Instead of running DTW on the raw mel-spectrograms, you extract phoneme transcriptions for both the 
+Vocaloid output and the target audio. You then restrict the DTW path so it can only align frames that 
+share the same underlying phoneme.
+
+
+
+3: pitch correct soulX audio with OpenUtau (we put this off)
+
+3A: introduce a conditioning signal for the model instead of changing the data
+
+
+
+4: speed up MFA alignment
+
+
+------ you are here ------
+important: make the pitch for Mohammad + Lingdong
+
+5: Alignment is kind of garbage, so try: keep post unaltered, and generate prior to match post + DTW it as well.
+
+6: Also save F0 extraction of Post.
+
+N: run on english dataset

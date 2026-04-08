@@ -1,0 +1,25 @@
+# Large data (transfer manually)
+DALI/
+Data/
+VocalPrompts/
+SoulX-Singer/pretrained_models/
+API/UtauGenerate/bin/
+API/UtauGenerate/assets/
+API/OpenUtau/
+
+# Build artifacts & caches
+__pycache__/
+*.pyc
+tmp_hifigan*/
+DataSynthesizer/scratch/
+
+# Machine-specific
+.env
+*.exe
+Miniconda3-*.sh
+
+# IDE & tooling
+.vscode/
+.claude/
+.geminiignore
+GEMINI.md

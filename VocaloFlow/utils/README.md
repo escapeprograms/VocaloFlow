@@ -1,0 +1,41 @@
+# VocaloFlow Utils Memory Palace
+
+Data extraction and loading utilities for the VocaloFlow training pipeline.
+
+## data_helpers.py
+
+Manifest loading, quality filtering, and train/val splitting.
+
+### `load_manifest(manifest_path, data_dir) -> pd.DataFrame`
+Loads `manifest.csv` and resolves all `*_path` columns from relative to absolute paths using `data_dir` as the root.
+
+### `filter_manifest(df, max_dtw_cost=200.0) -> pd.DataFrame`
+Filters chunks by DTW alignment quality. Removes rows where `dtw_cost` is NaN or exceeds the threshold. Prints before/after counts.
+
+### `split_by_song(df, val_fraction=0.05, seed=42) -> (train_df, val_df)`
+Song-level split by `dali_id` to prevent data leakage — all chunks from a song go into the same split. Shuffles song IDs with a fixed seed, takes the first `val_fraction` as validation.
+
+### `check_chunk_complete(row) -> bool`
+Verifies all 5 required `.npy` files exist on disk for a manifest row.
+
+## dataset.py
+
+### `VocaloFlowDataset(manifest_df, data_dir, max_seq_len=256, training=True)`
+PyTorch Dataset that handles three data challenges:
+
+1. **Phoneme indirection**: `phoneme_mask.npy` contains indices into `phoneme_ids.npy`. Resolved at load time: `resolved = phoneme_ids[clip(phoneme_mask, 0, len-1)]`.
+
+2. **T-mismatch**: prior_mel, target_mel, f0, voicing, and phoneme_mask can all have different time dimensions. All are resampled to `target_mel`'s T:
+   - `prior_mel`: linear interpolation (continuous values)
+   - `phoneme_ids`: nearest-neighbor interpolation (discrete values)
+   - `f0`: linear interpolation
+   - `voicing`: nearest-neighbor interpolation
+
+3. **Variable lengths**: Random crop (training) or start crop (eval) to `max_seq_len`. Shorter sequences are zero-padded. A `padding_mask` (bool, True=valid) is returned.
+
+**Returns dict** with keys: `target_mel` (T,128), `prior_mel` (T,128), `f0` (T,), `voicing` (T,), `phoneme_ids` (T,), `length` (int), `padding_mask` (T,).
+
+## collate.py
+
+### `vocaloflow_collate_fn(batch) -> dict`
+Stacks a list of dataset items into batched tensors. All items are already the same length (max_seq_len) so this is a straightforward `torch.stack`.
