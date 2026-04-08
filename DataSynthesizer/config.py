@@ -13,5 +13,5 @@ SOULX_PYTHON = os.environ.get(
 
 UTAU_GENERATE_DLL = os.environ.get(
     "UTAU_GENERATE_DLL",
-    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "API", "UtauGenerate", "bin", "Debug", "net9.0", "UtauGenerate.dll")),
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "API", "UtauGenerate", "bin", "Release", "net9.0", "UtauGenerate.dll")),
 )

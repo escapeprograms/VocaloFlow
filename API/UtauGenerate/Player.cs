@@ -225,14 +225,14 @@ namespace UtauGenerate
             }
             
             part.Validate(new OpenUtau.Core.ValidateOptions { SkipPhonemizer = false }, project, project.tracks[0]);
-            
+
             int waitTime = 5000;
             while (!part.PhonemesUpToDate && waitTime > 0)
             {
                 Thread.Sleep(50);
                 waitTime -= 50;
             }
-            
+
             Console.WriteLine($"Number of Phrases: {part.renderPhrases.Count}");
             foreach (var phrase in part.renderPhrases) {
                 Console.WriteLine($"Phrase with {phrase.phones.Length} phones");
