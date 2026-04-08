@@ -4,8 +4,9 @@ Data/
 VocalPrompts/
 SoulX-Singer/pretrained_models/
 API/UtauGenerate/bin/
-API/UtauGenerate/assets/
-API/OpenUtau/
+API/UtauGenerate/assets/Singers/
+API/OpenUtau/**/bin/
+API/OpenUtau/**/obj/
 
 # Build artifacts & caches
 __pycache__/
