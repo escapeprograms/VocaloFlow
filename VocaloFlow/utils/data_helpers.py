@@ -77,6 +77,43 @@ def split_by_song(
     return train_df, val_df
 
 
+def split_random(
+    df: pd.DataFrame,
+    val_fraction: float = 0.05,
+    seed: int = 42,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Split manifest into train/val by randomly sampling individual chunks (lines).
+
+    Unlike `split_by_song`, this does NOT respect song boundaries — chunks from
+    the same `dali_id` may end up on both sides of the split. Useful as a
+    leakage-tolerant baseline to compare against song-level splitting.
+
+    Args:
+        df: Manifest DataFrame.
+        val_fraction: Fraction of chunks to reserve for validation.
+        seed: Random seed for reproducibility.
+
+    Returns:
+        (train_df, val_df) tuple.
+    """
+    rng = np.random.RandomState(seed)
+    indices = np.arange(len(df))
+    rng.shuffle(indices)
+
+    n_val = max(1, int(len(indices) * val_fraction))
+    val_idx = indices[:n_val]
+    train_idx = indices[n_val:]
+
+    train_df = df.iloc[train_idx].reset_index(drop=True)
+    val_df = df.iloc[val_idx].reset_index(drop=True)
+
+    n_songs_overlap = len(set(train_df["dali_id"]).intersection(set(val_df["dali_id"])))
+    print(f"[data_helpers] Random split: {len(train_df)} train chunks, "
+          f"{len(val_df)} val chunks "
+          f"({n_songs_overlap} songs appear in both splits)")
+    return train_df, val_df
+
+
 def check_chunk_complete(row: pd.Series) -> bool:
     """Check if all required .npy files exist for a chunk.
 

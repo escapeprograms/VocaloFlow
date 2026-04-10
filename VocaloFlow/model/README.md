@@ -1,6 +1,6 @@
 # VocaloFlow Model Memory Palace
 
-Neural network architecture for the VocaloFlow conditional flow matching model.
+Neural network architecture for the VocaloFlow conditional flow matching model (v2 — deeper/narrower with regularization).
 
 ## vocaloflow.py
 
@@ -12,12 +12,14 @@ Top-level nn.Module. Orchestrates all sub-components.
 - Output: (B,T,128) predicted velocity vector
 
 **Forward flow**:
-1. `phoneme_embed(phoneme_ids)` → (B,T,256)
-2. Concatenate [x_t, prior_mel, f0, voicing, ph_emb] → (B,T,514)
-3. `input_proj` Conv1d(514,1024,k=1) → (B,T,1024)
-4. `timestep_mlp(t)` → (B,1024) conditioning vector
-5. 2x `DiTBlock(h, c, mask)` → (B,T,1024)
-6. `output_norm` + `output_proj` Linear(1024,128) → (B,T,128)
+1. `phoneme_embed(phoneme_ids)` → (B,T,64)
+2. `f0_embed(f0)` → (B,T,64) via learned MLP
+3. Per-stream LayerNorm on x_t (128), prior_mel (128), f0_emb (64), ph_emb (64). vuv (1) passed raw.
+4. Concatenate all → (B,T,385)
+5. `input_proj` Linear(385,512) → (B,T,512)
+6. `timestep_mlp(t)` → (B,512) conditioning vector
+7. 6x `DiTBlock(h, c, mask)` → (B,T,512)
+8. `output_norm` + `output_proj` Linear(512,128) → (B,T,128)
 
 ## dit_block.py
 
@@ -26,11 +28,12 @@ Adaptive Layer Normalization with zero initialization. Projects conditioning vec
 
 **Key**: Linear layer is zero-initialized so gamma=0→scale=1, beta=0→shift=0, alpha=0→gate=0. This makes each DiT block start as an identity function, critical for stable training.
 
-### `DiTBlock(hidden_dim=1024, num_heads=16, ffn_dim=4096, max_len=1024)`
+### `DiTBlock(hidden_dim=512, num_heads=8, ffn_dim=2048, max_len=512, dropout=0.1)`
 Pre-norm transformer block with:
-- **Self-attention**: 16 heads, 64 dim/head. Q,K,V via single `qkv` Linear. RoPE applied to Q and K. Uses `F.scaled_dot_product_attention` (FlashAttention when available). Gated residual: `x = x + alpha1 * attn_out`.
-- **FFN**: Linear(1024,4096) → GELU → Linear(4096,1024). Gated residual: `x = x + alpha2 * ffn_out`.
+- **Self-attention**: 8 heads, 64 dim/head. Q,K,V via single `qkv` Linear. RoPE applied to Q and K. Uses `F.scaled_dot_product_attention` (FlashAttention when available). Dropout on attention output. Gated residual: `x = x + alpha1 * attn_out`.
+- **FFN**: Linear(512,2048) → GELU → Linear(2048,512). Dropout on FFN output. Gated residual: `x = x + alpha2 * ffn_out`.
 - **LayerNorms**: `elementwise_affine=False` — modulation comes from AdaLN instead.
+- **Dropout**: `attn_dropout` and `ffn_dropout` applied after respective output projections, before gated residual.
 - **Padding mask**: Converted to (B,1,T,T) attention mask for SDPA.
 - **RoPE frequencies**: Precomputed and stored as a buffer (`freqs_cis`).
 
@@ -39,11 +42,14 @@ Pre-norm transformer block with:
 ### `sinusoidal_timestep_embedding(t, dim, max_period=10000.0) -> Tensor`
 Standard sinusoidal embedding for continuous timestep t. Returns (B, dim) with cos/sin pairs.
 
-### `TimestepMLP(hidden_dim=1024, sinusoidal_dim=256)`
-Sinusoidal(256) → Linear(256,1024) → SiLU → Linear(1024,1024). Maps scalar timestep t ∈ [0,1] to conditioning vector (B, 1024).
+### `TimestepMLP(hidden_dim=512, sinusoidal_dim=256)`
+Sinusoidal(256) → Linear(256,512) → SiLU → Linear(512,512). Maps scalar timestep t ∈ [0,1] to conditioning vector (B, 512).
 
-### `PhonemeEmbedding(vocab_size=2820, embed_dim=256)`
-`nn.Embedding` lookup table with `padding_idx=0` (PAD token). Maps (B,T) int64 → (B,T,256).
+### `F0Embedding(embed_dim=64)`
+Learned MLP for continuous F0 values: Linear(1,64) → SiLU → Linear(64,64). Maps (B,T) Hz values to (B,T,64) dense embeddings. Provides a richer pitch representation than a single raw channel.
+
+### `PhonemeEmbedding(vocab_size=2820, embed_dim=64)`
+`nn.Embedding` lookup table with `padding_idx=0` (PAD token). Maps (B,T) int64 → (B,T,64). Reduced from 256 to 64 so phoneme identity doesn't dominate the input over the prior mel signal.
 
 ## rope.py
 

@@ -6,9 +6,9 @@ Conditional flow matching model that maps low-quality Vocaloid mel-spectrograms 
 
 VocaloFlow takes a paired dataset of Vocaloid (prior) and high-quality (target) mel-spectrograms, along with phoneme, F0, and voicing conditioning, and learns a velocity field that transforms the prior into the target via an ODE.
 
-**Architecture**: 2-layer Diffusion Transformer (DiT) with AdaLN-Zero conditioning, ~35-50M parameters.
-**Training objective**: OT-CFM with linear interpolation path x_t = (1-(1-σ)t)x_0 + tx_1.
-**Inference**: ODE integration (Euler or midpoint) from t=0 to t=1.
+**Architecture (v2)**: 6-layer Diffusion Transformer (DiT) with AdaLN-Zero conditioning, per-stream input normalization, learned F0 embedding, dropout, ~26M parameters.
+**Training objective**: OT-CFM with linear interpolation path x_t = (1-(1-σ)t)x_0 + tx_1, plus classifier-free guidance (CFG) dropout.
+**Inference**: ODE integration (Euler or midpoint) from t=0 to t=1, with optional CFG.
 
 ## Directory Structure
 
@@ -152,8 +152,13 @@ Outputs:
 Single dataclass holding all hyperparameters. Key values:
 - `data_dir="../../Data"`, `manifest_path="../../Data/manifest.csv"`
 - `max_dtw_cost=200.0` — Quality filter threshold
-- `phoneme_vocab_size=2820`, `phoneme_embed_dim=256`
-- `hidden_dim=1024`, `num_heads=16`, `ffn_dim=4096`, `num_dit_blocks=2`
-- `input_channels=514` (128+128+1+1+256)
+- `phoneme_vocab_size=2820`, `phoneme_embed_dim=64`, `f0_embed_dim=64`
+- `hidden_dim=512`, `num_heads=8`, `ffn_dim=2048`, `num_dit_blocks=6`, `dropout=0.1`
+- `input_channels=385` (128+128+64+64+1)
+- `cfg_dropout_prob=0.2`, `cfg_scale=2.0`
 - `max_seq_len=256` — Covers p95 of sequence lengths
 - `batch_size=32`, `learning_rate=1e-4`, `total_steps=200_000`
+
+
+
+

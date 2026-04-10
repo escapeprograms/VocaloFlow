@@ -1,4 +1,4 @@
-"""ODE integration for sampling from the learned flow."""
+"""ODE integration for sampling from the learned flow, with optional CFG."""
 
 import torch
 from torch import Tensor
@@ -16,8 +16,12 @@ def sample_ode(
     method: str = "midpoint",
     padding_mask: Tensor | None = None,
     diagnostics: bool = True,
+    cfg_scale: float = 1.0,
 ) -> Tensor:
     """Integrate the learned ODE from t=0 (prior) to t=1 (target).
+
+    When cfg_scale > 1.0, uses classifier-free guidance: runs both a
+    conditional and unconditional forward pass per step, then interpolates.
 
     Args:
         model: Trained VocaloFlow model (should be in eval mode).
@@ -29,42 +33,57 @@ def sample_ode(
         method: "euler" or "midpoint".
         padding_mask: (B, T) bool, True = valid frame.
         diagnostics: If True, print velocity stats at key steps.
+        cfg_scale: Classifier-free guidance scale (1.0 = no guidance).
 
     Returns:
         (B, T, 128) predicted high-quality mel-spectrogram.
     """
     model.eval()
+    use_cfg = cfg_scale > 1.0
     dt = 1.0 / num_steps
     x_t = x_0.clone()
 
-    # Steps to log diagnostics (first, middle, last)
+    # Pre-build unconditional inputs (zeros) if using CFG
+    if use_cfg:
+        zeros_f0 = torch.zeros_like(f0)
+        zeros_voicing = torch.zeros_like(voicing)
+        zeros_ph = torch.zeros_like(phoneme_ids)
+
+    # Steps to log diagnostics (first, quarter, middle, last)
     _diag_steps = {0, num_steps // 4, num_steps // 2, num_steps - 1}
+
+    def _get_velocity(x: Tensor, t_tensor: Tensor) -> Tensor:
+        """Get velocity, applying CFG if enabled."""
+        v_cond = model(x, t_tensor, x_0, f0, voicing, phoneme_ids, padding_mask)
+        if not use_cfg:
+            return v_cond
+        v_uncond = model(x, t_tensor, x_0, zeros_f0, zeros_voicing, zeros_ph, padding_mask)
+        return v_uncond + cfg_scale * (v_cond - v_uncond)
 
     for i in range(num_steps):
         t_val = i * dt
         t = torch.full((x_0.shape[0],), t_val, device=x_0.device)
 
         if method == "euler":
-            v = model(x_t, t, x_0, f0, voicing, phoneme_ids, padding_mask)
+            v = _get_velocity(x_t, t)
             x_t = x_t + dt * v
-            _v_diag = v
 
         elif method == "midpoint":
             # Half step
-            v1 = model(x_t, t, x_0, f0, voicing, phoneme_ids, padding_mask)
+            v1 = _get_velocity(x_t, t)
             x_mid = x_t + 0.5 * dt * v1
 
             # Full step using midpoint velocity
             t_mid = torch.full((x_0.shape[0],), t_val + 0.5 * dt, device=x_0.device)
-            v2 = model(x_mid, t_mid, x_0, f0, voicing, phoneme_ids, padding_mask)
+            v2 = _get_velocity(x_mid, t_mid)
             x_t = x_t + dt * v2
-            _v_diag = v2
+            v = v2  # for diagnostics
 
         else:
             raise ValueError(f"Unknown ODE method: {method}")
 
         if diagnostics and i in _diag_steps:
-            _vabs = _v_diag.abs()
+            _vabs = v.abs()
             print(f"  [ode] step {i:3d}/{num_steps}  t={t_val:.4f}  "
                   f"|v| mean={_vabs.mean():.6f}  max={_vabs.max():.6f}  "
                   f"|x_t| mean={x_t.abs().mean():.4f}")

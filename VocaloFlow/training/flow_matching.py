@@ -1,4 +1,4 @@
-"""Optimal Transport Conditional Flow Matching (OT-CFM) loss."""
+"""Optimal Transport Conditional Flow Matching (OT-CFM) loss with CFG dropout."""
 
 import torch
 import torch.nn as nn
@@ -13,13 +13,19 @@ class FlowMatchingLoss(nn.Module):
 
     Loss = E_t[ || v_theta(x_t, t, cond) - v ||^2 ],  masked for padding.
 
+    Supports classifier-free guidance (CFG) dropout: during training,
+    conditioning signals (f0, voicing, phoneme_ids) are randomly replaced
+    with zeros to train the unconditional path.
+
     Args:
         sigma_min: Small noise floor for numerical stability (default 1e-4).
+        cfg_dropout_prob: Probability of dropping conditioning per sample (default 0.0).
     """
 
-    def __init__(self, sigma_min: float = 1e-4) -> None:
+    def __init__(self, sigma_min: float = 1e-4, cfg_dropout_prob: float = 0.0) -> None:
         super().__init__()
         self.sigma_min = sigma_min
+        self.cfg_dropout_prob = cfg_dropout_prob
 
     def forward(
         self,
@@ -58,6 +64,19 @@ class FlowMatchingLoss(nn.Module):
 
         # Target velocity (constant along the OT path)
         v_target = x_1 - s * x_0
+
+        # CFG dropout: zero out conditioning for random samples
+        if self.training and self.cfg_dropout_prob > 0:
+            drop_mask = torch.rand(B, device=device) < self.cfg_dropout_prob  # (B,)
+            if drop_mask.any():
+                # Zero out f0, voicing, and phoneme_ids for dropped samples
+                drop_2d = drop_mask[:, None]  # (B, 1) for broadcasting with (B, T)
+                f0 = f0.clone()
+                voicing = voicing.clone()
+                phoneme_ids = phoneme_ids.clone()
+                f0[drop_mask] = 0.0
+                voicing[drop_mask] = 0.0
+                phoneme_ids[drop_mask] = 0
 
         # Predict velocity
         v_pred = model(x_t, t, x_0, f0, voicing, phoneme_ids, padding_mask)

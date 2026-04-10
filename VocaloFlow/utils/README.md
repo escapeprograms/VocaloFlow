@@ -15,6 +15,9 @@ Filters chunks by DTW alignment quality. Removes rows where `dtw_cost` is NaN or
 ### `split_by_song(df, val_fraction=0.05, seed=42) -> (train_df, val_df)`
 Song-level split by `dali_id` to prevent data leakage — all chunks from a song go into the same split. Shuffles song IDs with a fixed seed, takes the first `val_fraction` as validation.
 
+### `split_random(df, val_fraction=0.05, seed=42) -> (train_df, val_df)`
+Random per-chunk (line) split that does NOT respect song boundaries — chunks from the same `dali_id` may appear in both train and val. Provided as a leakage-tolerant baseline for comparison against `split_by_song`. Selected at training time via `config.split_mode="random"` or the `--split-mode random` CLI flag in `training/train.py`. Logs how many songs end up overlapping the two splits.
+
 ### `check_chunk_complete(row) -> bool`
 Verifies all 5 required `.npy` files exist on disk for a manifest row.
 

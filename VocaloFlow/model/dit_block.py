@@ -43,21 +43,23 @@ class AdaLNZero(nn.Module):
 
 
 class DiTBlock(nn.Module):
-    """Transformer block with RoPE self-attention, GELU FFN, and AdaLN-Zero.
+    """Transformer block with RoPE self-attention, GELU FFN, AdaLN-Zero, and dropout.
 
     Args:
-        hidden_dim: Model hidden dimension (default 1024).
-        num_heads: Number of attention heads (default 16).
-        ffn_dim: Feed-forward intermediate dimension (default 4096).
-        max_len: Maximum sequence length for RoPE precomputation (default 1024).
+        hidden_dim: Model hidden dimension (default 512).
+        num_heads: Number of attention heads (default 8).
+        ffn_dim: Feed-forward intermediate dimension (default 2048).
+        max_len: Maximum sequence length for RoPE precomputation (default 512).
+        dropout: Dropout rate for attention and FFN outputs (default 0.1).
     """
 
     def __init__(
         self,
-        hidden_dim: int = 1024,
-        num_heads: int = 16,
-        ffn_dim: int = 4096,
-        max_len: int = 1024,
+        hidden_dim: int = 512,
+        num_heads: int = 8,
+        ffn_dim: int = 2048,
+        max_len: int = 512,
+        dropout: float = 0.1,
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -78,6 +80,10 @@ class DiTBlock(nn.Module):
             nn.GELU(),
             nn.Linear(ffn_dim, hidden_dim),
         )
+
+        # Dropout (regularization)
+        self.attn_dropout = nn.Dropout(dropout)
+        self.ffn_dropout = nn.Dropout(dropout)
 
         # AdaLN-Zero conditioning
         self.adaln = AdaLNZero(hidden_dim)
@@ -134,6 +140,7 @@ class DiTBlock(nn.Module):
         attn_out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         attn_out = attn_out.transpose(1, 2).reshape(B, T, D)
         attn_out = self.attn_out(attn_out)
+        attn_out = self.attn_dropout(attn_out)
 
         # Gated residual
         x = x + alpha1 * attn_out
@@ -142,6 +149,7 @@ class DiTBlock(nn.Module):
         h = self.norm2(x)
         h = (1 + gamma2) * h + beta2
         ffn_out = self.ffn(h)
+        ffn_out = self.ffn_dropout(ffn_out)
 
         # Gated residual
         x = x + alpha2 * ffn_out

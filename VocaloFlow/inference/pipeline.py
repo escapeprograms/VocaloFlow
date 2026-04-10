@@ -373,6 +373,7 @@ def infer_chunked(
     num_steps: int = 32,
     method: str = "midpoint",
     device: torch.device = torch.device("cpu"),
+    cfg_scale: float = 1.0,
 ) -> np.ndarray:
     """Run chunked ODE inference with overlap-add blending.
 
@@ -425,7 +426,8 @@ def infer_chunked(
         v_t = torch.from_numpy(v.astype(np.float32)).unsqueeze(0).to(device)
         ph_t = torch.from_numpy(ph.astype(np.int64)).unsqueeze(0).to(device)
 
-        pred = sample_ode(model, pm_t, f_t, v_t, ph_t, num_steps, method, mask)
+        pred = sample_ode(model, pm_t, f_t, v_t, ph_t, num_steps, method, mask,
+                          cfg_scale=cfg_scale)
         pred = pred[0, :length].cpu().numpy()
 
         # Blending window: fade in at left overlap, fade out at right overlap
@@ -496,6 +498,8 @@ def parse_args() -> argparse.Namespace:
                    help="Path to RMVPE checkpoint for F0 extraction")
     p.add_argument("--phoneset", default=_DEFAULT_PHONESET,
                    help="Path to phone_set.json")
+    p.add_argument("--cfg-scale", type=float, default=2.0,
+                   help="Classifier-free guidance scale (1.0 = no guidance)")
     return p.parse_args()
 
 
@@ -575,7 +579,7 @@ def main():
         model, prior_mel, f0, voicing, phoneme_ids,
         chunk_size=args.chunk_size, overlap=args.overlap,
         num_steps=args.num_ode_steps, method=args.ode_method,
-        device=device,
+        device=device, cfg_scale=args.cfg_scale,
     )
 
     # ── Diagnostic: output mel vs prior mel ──

@@ -56,15 +56,45 @@ class TimestepMLP(nn.Module):
         return self.mlp(emb)
 
 
+class F0Embedding(nn.Module):
+    """Learned embedding for continuous F0 values.
+
+    Small MLP that projects scalar F0 (in Hz) to a dense representation,
+    giving the model a richer pitch signal than a single raw channel.
+
+    Args:
+        embed_dim: Output embedding dimension (default 64).
+    """
+
+    def __init__(self, embed_dim: int = 64) -> None:
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(1, embed_dim),
+            nn.SiLU(),
+            nn.Linear(embed_dim, embed_dim),
+        )
+
+    def forward(self, f0: Tensor) -> Tensor:
+        """Embed continuous F0 values.
+
+        Args:
+            f0: (B, T) F0 contour in Hz.
+
+        Returns:
+            (B, T, embed_dim) dense F0 embedding.
+        """
+        return self.mlp(f0.unsqueeze(-1))
+
+
 class PhonemeEmbedding(nn.Module):
     """Learned embedding table for phoneme token IDs.
 
     Args:
         vocab_size: Number of phoneme tokens (default 2820).
-        embed_dim: Output embedding dimension (default 256).
+        embed_dim: Output embedding dimension (default 64).
     """
 
-    def __init__(self, vocab_size: int = 2820, embed_dim: int = 256) -> None:
+    def __init__(self, vocab_size: int = 2820, embed_dim: int = 64) -> None:
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
 
