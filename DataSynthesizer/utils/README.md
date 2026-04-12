@@ -14,6 +14,13 @@ Vocoder integration for converting mel-spectrograms back to audio waveforms.
 - `invert_mel_to_audio_soulxsinger(mel, config)`: SoulX-Singer's built-in Vocos vocoder (best quality for SoulX mel-spectrograms).
 - Lazy-loads models on first call; caches globally.
 
+### `midi_helpers.py`
+Vendored SoulX-Singer metadata writer — the parent-process subset of `SoulX-Singer/preprocess/tools/midi_parser.py` and `g2p.py`, copied here so that `stages/synthesizeTarget.py` can serialize `music.json` without importing anything from `SoulX-Singer/preprocess/`. The upstream import chain `midi_parser → f0_extraction` pulls torch at module-top-level, which was the reason DataSynthesizer's parent process used to require a torch-carrying conda env. Decoupling via this file is what enables the `vocaloflow-datasynthesizer` (parent) vs `soulxsinger` (subprocess) env split.
+- `Note` dataclass: `start_s`, `note_dur`, `note_text`, `note_pitch`, `note_type`, with `end_s` property.
+- `notes2meta(notes, meta_path, vocal_file, language, pitch_extractor)`: Writes SoulX-Singer-format `music.json` from a list of `Note`. In the parent's call path both `vocal_file` and `pitch_extractor` are always `None` — the vocal-cutting and RMVPE branches in `_append_segment_to_meta` are dormant. Segments are split on long `<SP>` gaps (> `MAX_GAP_SEC = 2.0s`) or when total segment duration would exceed `MAX_SEGMENT_DUR_SUM_SEC = 60s`.
+- `g2p_transform(words, lang)` + helpers: grapheme-to-phoneme using `g2pM` for Mandarin/Cantonese and `g2p_en` for English.
+- **Byte-equivalence with upstream** is enforced by `DataSynthesizer/tests/test_midi_helpers.py` — 4 parametrized scenarios (English phrase, long-gap split, duration-sum split, empty-text coercion) that diff vendored output against calling `SoulX-Singer/preprocess/tools/midi_parser.notes2meta` directly. If upstream's serialization format ever changes, those tests will fail and this file must be re-synced.
+
 ### `grab_midi.py`
 Frequency-to-MIDI conversion and per-note pitch computation from F0.
 - `freq_to_midi(freq)`: Converts a raw Hz frequency into an integer MIDI note number.

@@ -500,6 +500,8 @@ def parse_args() -> argparse.Namespace:
                    help="Path to phone_set.json")
     p.add_argument("--cfg-scale", type=float, default=2.0,
                    help="Classifier-free guidance scale (1.0 = no guidance)")
+    p.add_argument("--mask-phonemes", action="store_true",
+                   help="Zero out all phoneme IDs (diagnostic: removes linguistic conditioning)")
     return p.parse_args()
 
 
@@ -559,6 +561,10 @@ def main():
     phoneme_ids = build_phoneme_ids(
         notes_data["notes"], notes_data["ms_per_tick"], T, args.phoneset
     )
+
+    if args.mask_phonemes:
+        phoneme_ids = np.zeros_like(phoneme_ids)
+        print("[pipeline] --mask-phonemes set: zeroed out all phoneme IDs")
 
     # ── Diagnostic: phoneme ID stats ──
     _unique_ids = np.unique(phoneme_ids)

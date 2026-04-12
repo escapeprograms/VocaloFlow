@@ -17,7 +17,7 @@ Generates vocal synthesis using the SoulX-Singer model.
   - `defer_inference=False` (default): immediately launches `batch/soulxsinger_batch_infer.py` subprocess (per-song use).
   - `defer_inference=True`: skips the subprocess and **returns** the list of inference task dicts for the caller to batch across songs.
 - Supports `save_mel=True` to also export `target_mel.npy` alongside `target.wav`.
-- Imports: `utils.grab_midi`, `utils.determine_chunks`, `utils.prompt_selection`, `voice_providers`.
+- Imports: `utils.midi_helpers` (vendored `Note` + `notes2meta`, see below), `utils.grab_midi`, `utils.determine_chunks`, `utils.prompt_selection`, `voice_providers`. The parent process no longer imports anything from `SoulX-Singer/preprocess/` — that would pull torch transitively via `midi_parser → f0_extraction`, which is the whole reason the helpers were vendored.
 
 ### `synthesizePrior.py`
 Generates vocal synthesis using the OpenUtau API.

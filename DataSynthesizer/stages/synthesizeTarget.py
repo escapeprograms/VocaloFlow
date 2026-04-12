@@ -11,15 +11,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from config import SOULX_PYTHON
 
-# Add SoulX-Singer to path to import its modules
+# SOULX_DIR is used below to build subprocess PYTHONPATH / cwd and file paths
+# into the SoulX-Singer source tree. No parent-process imports from SoulX-Singer
+# are needed — the midi helpers are vendored in utils.midi_helpers.
 SOULX_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "SoulX-Singer"))
-sys.path.append(SOULX_DIR)
-
-try:
-    from preprocess.tools.midi_parser import MidiParser, midi2notes
-except ImportError:
-    print("Warning: Could not import MidiParser. Make sure dependencies (mido, librosa) are installed.")
-    MidiParser = None
 
 # Set up DALI import path
 try:
@@ -105,7 +100,7 @@ def process_dali_to_target(dali_id="006b5d1db6a447039c30443310b60c6f", language=
     print(f"Generating SoulX-Singer annotations using mode: {mode}...")
     
     try:
-        from preprocess.tools.midi_parser import notes2meta, Note
+        from utils.midi_helpers import notes2meta, Note
         
         from utils.determine_chunks import get_chunks
         chunks, chunk_start_times, chunk_names = get_chunks(mode, notes_annot, words_annot, lines_annot, paragraphs_annot, n_lines=n_lines)
@@ -278,4 +273,4 @@ if __name__ == "__main__":
     print("Running demo for DataSynthesizer module...")
     process_dali_to_target()
 
-#conda run -n data_synthesizer python synthesizePrior.py
+#conda run -n vocaloflow-datasynthesizer python synthesizePrior.py

@@ -6,7 +6,7 @@ then generates Prior audio (OpenUtau) from those extracted notes.  Finally runs
 DTW alignment.  This is the v2 counterpart of synthesize.py.
 
 Usage:
-    conda run -n data_synthesizer python synthesize_v2.py --dali_id <ID> --mode line
+    conda run -n vocaloflow-datasynthesizer python synthesize_v2.py --dali_id <ID> --mode line
 """
 
 import argparse
@@ -154,7 +154,7 @@ def synthesize_v2(
     print(f"[{ts()}] Target synthesis complete.")
 
     # ------------------------------------------------------------------
-    # Phase 3: Note extraction + F0 (subprocess in soulxsinger env)
+    # Phase 3: Note extraction + F0 (subprocess in soulxsinger env via SOULX_PYTHON)
     # ------------------------------------------------------------------
     print(f"\n[{ts()}] === Phase 3: Note Extraction + F0 ===")
 

@@ -127,14 +127,17 @@ class DiTBlock(nn.Module):
         # Apply RoPE to Q and K
         q, k = apply_rotary_emb(q, k, self.freqs_cis)
 
-        # Build attention mask from padding mask
+        # Build attention mask from padding mask. Mask KEYS only.
+        # NOTE: do NOT also AND-in a query mask. That would create rows of
+        # all-False at padded query positions, which CUDA SDPA backends
+        # softmax to NaN; the NaN then poisons every valid position via the
+        # V-tensor product (0 * NaN = NaN). Padded query outputs are
+        # meaningless but harmless: they are sliced off in infer_chunked
+        # and masked out of the training loss.
         attn_mask = None
         if padding_mask is not None:
             # (B, T) -> (B, 1, 1, T) for broadcasting with (B, H, T, T)
             attn_mask = padding_mask[:, None, None, :].expand(B, 1, T, T)
-            # Also mask query positions
-            query_mask = padding_mask[:, None, :, None].expand(B, 1, T, T)
-            attn_mask = attn_mask & query_mask
 
         # Scaled dot-product attention (uses FlashAttention when available)
         attn_out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)

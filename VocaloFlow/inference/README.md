@@ -41,6 +41,7 @@ Top-level orchestration. Run as `python -m inference.pipeline ...` from the `Voc
 | `--rmvpe-model` | `SoulX-Singer/pretrained_models/rmvpe/rmvpe.pt` | |
 | `--phoneset` | `SoulX-Singer/soulxsinger/utils/phoneme/phone_set.json` | |
 | `--cfg-scale` | `2.0` | Classifier-free guidance; `1.0` disables CFG |
+| `--mask-phonemes` | off | Diagnostic flag: zeros out all phoneme IDs after `build_phoneme_ids`, removing linguistic conditioning. Useful for isolating the model's behavior driven by F0/voicing/prior alone. |
 
 ### `inference.py` — ODE sampler
 Single function: `sample_ode(model, x_0, f0, voicing, phoneme_ids, num_steps=32, method="midpoint", padding_mask=None, diagnostics=True, cfg_scale=1.0)`.

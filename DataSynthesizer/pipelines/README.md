@@ -15,7 +15,7 @@ This directory contains the **entry-point scripts** for the DataSynthesizer modu
 Single-song driver — runs the target-first pipeline for one DALI entry.
 - **Four-phase pipeline** (all in one script, subprocesses for GPU phases):
   - **Phase 1**: Generate `music.json` + `chunk_words.json` from DALI annotations.
-  - **Phase 2**: SoulX-Singer inference (subprocess in `soulxsinger` env).
+  - **Phase 2**: SoulX-Singer inference (subprocess in `soulxsinger` env, launched via `SOULX_PYTHON`).
   - **Phase 3**: `music.json` note extraction + F0 (subprocess via `batch/note_extraction_batch.py`).
   - **Phase 4**: Prior generation from extracted notes via OpenUtau + iterative alignment until DTW convergence.
 - Helper functions: `extract_chunk_words`, `save_chunk_words` (also used by `synthesize_dataset_v2.py`).
@@ -38,11 +38,11 @@ Dataset-scale driver for the target-first pipeline.
 
 ```bash
 # Single song
-conda run -n soulxsinger python pipelines/synthesize_v2.py --dali_id <id> --mode line
+conda run -n vocaloflow-datasynthesizer python pipelines/synthesize_v2.py --dali_id <id> --mode line
 
 # Full English dataset
-conda run -n soulxsinger python pipelines/synthesize_dataset_v2.py --phases 12345 --songs_per_batch 100
+conda run -n vocaloflow-datasynthesizer python pipelines/synthesize_dataset_v2.py --phases 12345 --songs_per_batch 100
 
 # Resume a specific phase
-conda run -n soulxsinger python pipelines/synthesize_dataset_v2.py --phases 34 --songs_per_batch 50
+conda run -n vocaloflow-datasynthesizer python pipelines/synthesize_dataset_v2.py --phases 34 --songs_per_batch 50
 ```
