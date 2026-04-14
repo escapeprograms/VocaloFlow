@@ -7,9 +7,10 @@ from torch import nn, view_as_real, view_as_complex
 from torch import nn
 from torch.nn.utils import weight_norm, remove_weight_norm
 from torchaudio.functional.functional import _hz_to_mel, _mel_to_hz
-import accelerate
-
-from omegaconf import DictConfig
+try:
+    from omegaconf import DictConfig
+except ImportError:
+    DictConfig = None  # Only used as type hint in load_vocos_model
 
 
 def _deep_update_dict(base: dict, override: Optional[dict]) -> dict:
@@ -990,6 +991,7 @@ def load_checkpoint(build_model_func, cfg, ckpt_path):
     model = build_model_func(cfg)
     
     if ckpt_path is not None:
+        import accelerate
         accelerate.load_checkpoint_and_dispatch(model, ckpt_path)
     return model
 

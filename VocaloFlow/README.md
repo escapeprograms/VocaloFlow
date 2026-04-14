@@ -42,6 +42,7 @@ VocaloFlow/
 │   ├── __init__.py
 │   ├── README.md            # Memory palace (training)
 │   ├── train.py             # Main entry point (argparse CLI)
+│   ├── checkpoint.py        # save/load/find checkpoint utilities
 │   ├── flow_matching.py     # FlowMatchingLoss (OT-CFM)
 │   └── lr_schedule.py       # get_lr() with warmup + cosine decay
 │
@@ -76,10 +77,34 @@ From the `VocaloFlow/` directory:
 
 ```bash
 conda activate vocaloflow
+
+# Fresh run with a name
+python -m training.train --name my-experiment
+
+# Fresh run with YAML hyperparameter overrides
+python -m training.train --name 4-13-deep-convnet --config configs/cur_config.yaml
+
+# Resume (auto-detects latest checkpoint; architecture config is pulled from the checkpoint)
+python -m training.train --resume my-experiment
+
+# Resume with extended steps
+python -m training.train --resume my-experiment --total-steps 300000
+
+# No name (adopts wandb's auto-generated name)
 python -m training.train
 ```
 
+Each run creates:
+```
+checkpoints/<run_name>/checkpoint_{step}.pt
+configs/<run_name>/config.yaml
+logs/<run_name>/
+```
+
 CLI overrides (all optional):
+- `--name NAME` — Run name (determines checkpoint/log/config subdirs and wandb name)
+- `--resume NAME` — Resume training for the given run name
+- `--config PATH` — YAML file of partial overrides applied on top of defaults (see `configs/experiments/`)
 - `--data-dir PATH` — Root data directory (default `../../Data`)
 - `--manifest PATH` — Path to manifest.csv (default `../../Data/manifest.csv`)
 - `--batch-size N` — Batch size (default 32)
@@ -90,6 +115,14 @@ CLI overrides (all optional):
 ## How to Run Inference
 
 From the `VocaloFlow/` directory:
+
+Test script:
+python -m inference.pipeline 
+    --ustx "../demo/let_it_go/let_it_go.ustx" 
+    --checkpoint "checkpoints/4-13-deep-convnet/checkpoint_10000.pt" 
+    --output "../demo/let_it_go/4-13-deep-convnet/output.wav"
+    --save-mels
+
 
 ```bash
 conda activate vocaloflow
@@ -143,8 +176,9 @@ End-to-end inference pipeline: USTX -> enhanced WAV.
 - `SoulX-Singer/soulxsinger/utils/phoneme/phone_set.json` — 2820-token phoneme vocabulary
 
 Outputs:
-- Checkpoints: `./checkpoints/checkpoint_{step}.pt`
-- TensorBoard logs: `./logs/` (view with `tensorboard --logdir logs`)
+- Checkpoints: `./checkpoints/<run_name>/checkpoint_{step}.pt`
+- Config snapshots: `./configs/<run_name>/config.yaml`
+- TensorBoard logs: `./logs/<run_name>/` (view with `tensorboard --logdir logs`)
 
 ## configs/default.py
 

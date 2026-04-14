@@ -18,3 +18,14 @@ dependencies:
   - pip:
     - tensorboard
     - einops
+    # --- inference pipeline ---
+    - librosa
+    - soundfile
+    - pyyaml
+    - pythonnet          # OpenUTAU .ustx rendering via C# DLL
+    # --- SoulX-Singer g2p (cross-project import) ---
+    - g2pM               # Mandarin grapheme-to-phoneme
+    - g2p-en             # English grapheme-to-phoneme
+    - ToJyutping         # Cantonese romanization
+    # --- experiment tracking ---
+    - wandb

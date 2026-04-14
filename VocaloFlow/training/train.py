@@ -2,6 +2,7 @@
 
 import argparse
 import copy
+import dataclasses
 import os
 import sys
 from datetime import datetime
@@ -15,6 +16,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from configs.default import VocaloFlowConfig
 from model.vocaloflow import VocaloFlow
+from training.checkpoint import find_latest_checkpoint, load_checkpoint, save_checkpoint
 from training.flow_matching import FlowMatchingLoss
 from training.lr_schedule import get_lr
 from utils.data_helpers import load_manifest, filter_manifest, split_by_song, split_random
@@ -30,6 +32,56 @@ def train(config: VocaloFlowConfig) -> None:
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Device: {device}")
+
+    # ── Derive paths from run_name (before any I/O) ──────────────────────
+    if config.run_name:
+        config.checkpoint_dir = os.path.join("./checkpoints", config.run_name)
+        config.log_dir = os.path.join("./logs", config.run_name)
+
+    # ── Resume detection ─────────────────────────────────────────────────
+    start_step = 0
+    wandb_run_id = None
+    resume_ckpt = None
+
+    if config.run_name:
+        latest = find_latest_checkpoint(config.checkpoint_dir)
+        if latest:
+            resume_ckpt = load_checkpoint(latest, device)
+            start_step = resume_ckpt["step"]
+            wandb_run_id = resume_ckpt.get("wandb_run_id")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Resuming from step {start_step}")
+
+    # ── Logging (wandb first so we can adopt its name) ───────────────────
+    os.makedirs(config.checkpoint_dir, exist_ok=True)
+    os.makedirs(config.log_dir, exist_ok=True)
+
+    wandb_kwargs = dict(
+        entity="archimedesli",
+        project="VocaloFlow",
+        config=vars(config),
+        dir=config.log_dir,
+    )
+    if config.run_name:
+        wandb_kwargs["name"] = config.run_name
+    if wandb_run_id:
+        wandb_kwargs["id"] = wandb_run_id
+        wandb_kwargs["resume"] = "must"
+    wandb.init(**wandb_kwargs)
+
+    # If no name was given, adopt wandb's auto-generated name
+    if not config.run_name:
+        config.run_name = wandb.run.name
+        config.checkpoint_dir = os.path.join("./checkpoints", config.run_name)
+        config.log_dir = os.path.join("./logs", config.run_name)
+        os.makedirs(config.checkpoint_dir, exist_ok=True)
+
+    # Save config snapshot for this run (once, at first launch)
+    config_dir = os.path.join("./configs", config.run_name)
+    config_path = os.path.join(config_dir, "config.yaml")
+    if not os.path.exists(config_path):
+        os.makedirs(config_dir, exist_ok=True)
+        config.to_yaml(config_path)
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Saved config: {config_path}")
 
     # ── Data ──────────────────────────────────────────────────────────────
     manifest = load_manifest(config.manifest_path, config.data_dir)
@@ -71,21 +123,18 @@ def train(config: VocaloFlowConfig) -> None:
         cfg_dropout_prob=config.cfg_dropout_prob,
     )
 
-    # ── Logging ───────────────────────────────────────────────────────────
-    os.makedirs(config.checkpoint_dir, exist_ok=True)
-    os.makedirs(config.log_dir, exist_ok=True)
-    writer = SummaryWriter(log_dir=config.log_dir)
+    # ── Restore state if resuming ─────────────────────────────────────────
+    if resume_ckpt is not None:
+        model.load_state_dict(resume_ckpt["model_state_dict"])
+        ema_model.load_state_dict(resume_ckpt["ema_model_state_dict"])
+        optimizer.load_state_dict(resume_ckpt["optimizer_state_dict"])
+        del resume_ckpt  # free memory
 
-    wandb.init(
-        entity="archimedesli",
-        project="VocaloFlow",
-        config=vars(config),
-        dir=config.log_dir,
-    )
+    writer = SummaryWriter(log_dir=config.log_dir)
     wandb.watch(model, log="gradients", log_freq=config.log_every * 10)
 
     # ── Training Loop ─────────────────────────────────────────────────────
-    global_step = 0
+    global_step = start_step
     model.train()
 
     while global_step < config.total_steps:
@@ -147,12 +196,12 @@ def train(config: VocaloFlowConfig) -> None:
 
             # Checkpoint
             if global_step > 0 and global_step % config.save_every == 0:
-                save_checkpoint(model, ema_model, optimizer, global_step, config)
+                save_checkpoint(model, ema_model, optimizer, global_step, config, wandb.run.id)
 
             global_step += 1
 
     # Final save
-    save_checkpoint(model, ema_model, optimizer, global_step, config)
+    save_checkpoint(model, ema_model, optimizer, global_step, config, wandb.run.id)
     writer.close()
     wandb.finish()
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Training complete.")
@@ -191,27 +240,77 @@ def validate(
     return total_loss / max(1, n_batches)
 
 
-def save_checkpoint(
-    model: VocaloFlow,
-    ema_model: VocaloFlow,
-    optimizer: torch.optim.Optimizer,
-    step: int,
-    config: VocaloFlowConfig,
-) -> None:
-    """Save training checkpoint."""
-    path = os.path.join(config.checkpoint_dir, f"checkpoint_{step}.pt")
-    torch.save({
-        "step": step,
-        "model_state_dict": model.state_dict(),
-        "ema_model_state_dict": ema_model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "config": config,
-    }, path)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Saved checkpoint: {path}")
+def _load_config_from_checkpoint(run_name: str) -> VocaloFlowConfig:
+    """Reconstruct a VocaloFlowConfig from the latest checkpoint of *run_name*.
+
+    Uses the config embedded in the checkpoint as ground truth for architecture
+    and training hyperparameters, so resumed runs always match the model shape
+    on disk. Fields that exist on the current dataclass but not in the saved
+    config (schema additions) keep their defaults.
+    """
+    checkpoint_dir = os.path.join("./checkpoints", run_name)
+    latest = find_latest_checkpoint(checkpoint_dir)
+    if latest is None:
+        raise FileNotFoundError(
+            f"No checkpoint found in {checkpoint_dir} — cannot resume {run_name!r}"
+        )
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Loading saved config from {latest}")
+    ckpt = torch.load(latest, map_location="cpu", weights_only=False)
+    saved = ckpt.get("config")
+    if saved is None:
+        raise ValueError(
+            f"Checkpoint {latest} has no embedded config — cannot safely resume. "
+            f"Pass --config explicitly if you know the original hyperparameters."
+        )
+
+    # Merge saved values into a fresh instance so any newly-added dataclass
+    # fields pick up their defaults.
+    fresh = VocaloFlowConfig()
+    valid = {f.name for f in dataclasses.fields(fresh)}
+    saved_dict = dataclasses.asdict(saved) if dataclasses.is_dataclass(saved) else vars(saved)
+    for k, v in saved_dict.items():
+        if k in valid:
+            setattr(fresh, k, v)
+    return fresh
+
+
+def _apply_yaml_overrides(config: VocaloFlowConfig, path: str) -> None:
+    """Merge a YAML file of partial overrides onto an existing config.
+
+    Validates that every key is a real field of the config and that every
+    value matches the field's declared type (with int -> float coercion).
+    """
+    import yaml
+
+    with open(path) as f:
+        overrides = yaml.safe_load(f) or {}
+
+    fields_by_name = {f.name: f for f in dataclasses.fields(config)}
+    for key, value in overrides.items():
+        if key not in fields_by_name:
+            raise ValueError(
+                f"Unknown config field in {path}: {key!r}. "
+                f"Valid fields: {sorted(fields_by_name)}"
+            )
+        expected_type = fields_by_name[key].type
+        if expected_type is float and isinstance(value, int):
+            value = float(value)
+        elif not isinstance(value, expected_type):
+            raise TypeError(
+                f"Config field {key!r} in {path} must be {expected_type.__name__}, "
+                f"got {type(value).__name__}: {value!r}"
+            )
+        setattr(config, key, value)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train VocaloFlow")
+    parser.add_argument("--name", type=str, default=None,
+                        help="Run name (used for checkpoint/log/config subdirs and wandb name)")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Resume training for the given run name")
+    parser.add_argument("--config", type=str, default=None,
+                        help="Path to a YAML file of config overrides (applied on top of defaults)")
     parser.add_argument("--data-dir", type=str, default=None)
     parser.add_argument("--manifest", type=str, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
@@ -224,7 +323,18 @@ def main():
                         help="Train/val split strategy: 'song' (default) or 'random' (per-chunk)")
     args = parser.parse_args()
 
-    config = VocaloFlowConfig()
+    # Precedence (fresh run):  dataclass defaults < --config YAML < CLI flags
+    # Precedence (resume):     saved checkpoint config < --config YAML < CLI flags
+    if args.resume:
+        config = _load_config_from_checkpoint(args.resume)
+        config.run_name = args.resume
+    else:
+        config = VocaloFlowConfig()
+        if args.name:
+            config.run_name = args.name
+
+    if args.config:
+        _apply_yaml_overrides(config, args.config)
     if args.data_dir:
         config.data_dir = args.data_dir
     if args.manifest:

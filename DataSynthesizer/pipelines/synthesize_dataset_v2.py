@@ -34,8 +34,11 @@ import tempfile
 from datetime import datetime
 from typing import List, Optional
 
-# Add DataSynthesizer root to path for cross-package imports
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# Add DataSynthesizer root and repo root to path for cross-package imports
+_DS_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_REPO_ROOT = os.path.abspath(os.path.join(_DS_ROOT, ".."))
+sys.path.insert(0, _DS_ROOT)
+sys.path.insert(0, _REPO_ROOT)
 
 from stages.synthesizeTarget import process_dali_to_target, get_soulx_inference_config
 from pipelines.synthesize_v2 import save_chunk_words

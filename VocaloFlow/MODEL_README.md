@@ -66,29 +66,35 @@ A single tensor of shape `(B, T, 128)`, float32 — the predicted **velocity fie
 
 ---
 
-## 5. Architecture (v2)
+## 5. Architecture (v3)
 
-VocaloFlow is a **6-layer Diffusion Transformer (DiT)** with rotary position embeddings, AdaLN-Zero conditioning, and per-stream input normalization. Total parameter count: **~29.2 million**.
+VocaloFlow is a **6-layer Diffusion Transformer (DiT)** with **4 ConvNeXtV2 pre-processing blocks**, rotary position embeddings, AdaLN-Zero conditioning, per-stream input normalization, and **blurred phoneme boundary embeddings**. Total parameter count: **~37.6 million** (~29.2M DiT + embeddings, ~8.4M ConvNeXt).
 
 ### 5.1 Key dimensions
 
-| Hyperparameter      | Value | Notes                                           |
-|---------------------|------:|-------------------------------------------------|
-| `hidden_dim`        |   512 | Width of the transformer                         |
-| `num_heads`         |     8 | Attention heads                                  |
-| `head_dim`          |    64 | hidden_dim / num_heads                           |
-| `ffn_dim`           |  2048 | FFN intermediate dimension (4× expansion)        |
-| `num_dit_blocks`    |     6 | Stacked transformer layers                       |
-| `phoneme_embed_dim` |    64 | Per-token phoneme embedding width                |
-| `f0_embed_dim`      |    64 | Learned F0 embedding width                       |
-| `dropout`           |   0.1 | Applied in every DiT block (attn + FFN)          |
-| `max_seq_len`       |   256 | Max frames per chunk (~5.12s)                    |
-| `phoneme_vocab_size`|  2820 | Full SoulX-Singer phone_set.json vocabulary      |
+| Hyperparameter         | Value | Notes                                           |
+|------------------------|------:|-------------------------------------------------|
+| `hidden_dim`           |   512 | Width of the transformer                         |
+| `num_heads`            |     8 | Attention heads                                  |
+| `head_dim`             |    64 | hidden_dim / num_heads                           |
+| `ffn_dim`              |  2048 | FFN intermediate dimension (4× expansion)        |
+| `num_dit_blocks`       |     6 | Stacked transformer layers                       |
+| `num_convnext_blocks`  |     4 | ConvNeXtV2 pre-processing blocks (0 = disable)   |
+| `convnext_kernel_size` |     7 | Depthwise conv kernel (7 frames = 140ms)         |
+| `phoneme_embed_dim`    |    64 | Per-token phoneme embedding width                |
+| `f0_embed_dim`         |    64 | Learned F0 embedding width                       |
+| `dropout`              |   0.1 | Applied in every DiT + ConvNeXt block            |
+| `max_seq_len`          |   256 | Max frames per chunk (~5.12s)                    |
+| `phoneme_vocab_size`   |  2820 | Full SoulX-Singer phone_set.json vocabulary      |
+| `phoneme_blur_enabled` |  True | Use BlurredPhonemeEmbedding (False = hard lookup) |
+| `phoneme_blend_fraction`| 0.3  | Blend radius as fraction of shorter phoneme duration |
 
 ### 5.2 Forward pipeline (in order)
 
-**Step 1 — Embed phonemes**
+**Step 1 — Embed phonemes (with optional boundary blurring)**
 `phoneme_ids: (B, T) int64` → look up in a learned `nn.Embedding(2820, 64, padding_idx=0)` → `(B, T, 64)`. Token ID 0 maps to a zero vector (padding).
+
+When `phoneme_blur_enabled=True` (default), `BlurredPhonemeEmbedding` is used instead of a hard lookup. Near phoneme boundaries, this produces a weighted average of adjacent phoneme embeddings instead of a sharp transition. The blend region scales with the shorter adjacent phoneme's duration — a 30ms stop consonant gets a ~9ms blend window, while a 500ms vowel gets ~150ms. See section 5.5 for details.
 
 **Step 2 — Embed F0**
 `f0: (B, T)` → MLP `Linear(1, 64) → SiLU → Linear(64, 64)` → `(B, T, 64)`. Continuous Hz values are projected to a 64-dim dense vector. This replaces the v1 design of using raw F0 as a single channel, which underparameterized the pitch signal.
@@ -112,13 +118,20 @@ Each input stream is independently normalized **before** concatenation:
 **Step 5 — Input projection**
 `Linear(385, 512)` → `(B, T, 512)`. This is a plain Linear layer (acts as Conv1d with kernel=1).
 
-**Step 6 — Timestep conditioning vector**
+**Step 6 — ConvNeXt pre-processing (NEW in v3)**
+4× ConvNeXtV2 blocks, each: depthwise Conv1d (kernel=7, groups=512) → LayerNorm → pointwise expand (512→2048) → GELU → GRN → pointwise project (2048→512) → dropout → residual. See section 5.4 for details.
+
+These blocks capture **local temporal patterns** — consonants and fast spectral transitions that span only 1–4 frames (5–20ms) — before the transformer processes them. The transformer's self-attention treats all positions equally, which is good for global structure but smooths over short-timescale phonetic events. The convolutional pre-processing addresses this.
+
+ConvNeXt blocks do **NOT** receive timestep conditioning. They process the input features independently of where on the flow path the model is. Only the DiT blocks are timestep-conditioned via AdaLN-Zero. This is intentional: the convolutional blocks prepare the conditioning signal, the transformer blocks do the flow matching.
+
+**Step 7 — Timestep conditioning vector**
 `t: (B,)` → sinusoidal embedding (256 dims, max_period=10000) → `Linear(256, 512) → SiLU → Linear(512, 512)` → `(B, 512)`. This vector `c` modulates every transformer block via AdaLN-Zero (see 5.3). The sinusoidal embedding gives the model a continuous, smoothly-varying representation of t ∈ [0, 1].
 
-**Step 7 — 6× DiT block**
+**Step 8 — 6× DiT block**
 Each block consumes `(B, T, 512)` hidden states and the conditioning vector `(B, 512)`, and produces `(B, T, 512)`. See 5.3 for what happens inside.
 
-**Step 8 — Output projection**
+**Step 9 — Output projection**
 `LayerNorm(512) → Linear(512, 128)` → `(B, T, 128)` velocity prediction.
 
 ### 5.3 Inside a single DiT block
@@ -144,7 +157,50 @@ A DiT block is a standard pre-norm transformer block, modified in two ways: it u
 
 The dropout in steps 7 and (FFN-)4 is the **only** stochastic regularization in the model architecture (CFG dropout, in section 7, lives in the loss function, not the model).
 
-### 5.4 Why narrow-and-deep instead of wide-and-shallow
+### 5.4 ConvNeXtV2 pre-processing blocks (NEW in v3)
+
+**Motivation**: The v2 model successfully learned pitch, timing, and timbral transformation, but produced mumbled/unintelligible output — the "duh" problem. Spectrogram analysis showed smeared formant structure and smoothed rapid spectral transitions (consonants). Transformers with self-attention process all positions equally, but consonants are defined by very short-timescale spectral events (5–20ms = 1–4 frames at 20ms/frame). Convolutional layers with small kernels naturally capture these local patterns.
+
+**Architecture**: 4 identical ConvNeXtV2 blocks stacked sequentially, following the ConvNeXtV2 design (depthwise-separable convolution with inverted bottleneck):
+
+1. **Depthwise Conv1d** — `Conv1d(512, 512, kernel_size=7, padding=3, groups=512)`. Each of the 512 channels is convolved independently. Kernel size 7 at 20ms/frame covers 140ms — roughly the duration of a consonant cluster or fast syllable transition.
+2. **LayerNorm(512)** — normalize after convolution.
+3. **Pointwise expand** — `Linear(512, 2048)`, 4× expansion ratio matching the DiT FFN.
+4. **GELU activation**.
+5. **Global Response Normalization (GRN)** — the ConvNeXtV2 improvement over V1. Computes per-channel L2 norm across the time dimension, normalizes by the mean norm, and applies learnable scale (`gamma`) and shift (`beta`) plus a residual. This adds inter-channel competition. `gamma` and `beta` are initialized to zero (identity at init).
+6. **Pointwise project** — `Linear(2048, 512)`, project back to hidden dim.
+7. **Dropout(0.1)** — matches DiT dropout rate.
+8. **Residual connection** — `output = input + projected`.
+
+**Parameter count**: ~2.1M per block, ~8.4M total for 4 blocks.
+
+**Receptive field**: With 4 stacked blocks and kernel=7, the effective receptive field is about 25 frames (~500ms), covering most syllables and short musical phrases.
+
+**Disable**: Set `num_convnext_blocks=0` in config to skip ConvNeXt entirely (reverts to v2-equivalent behavior).
+
+### 5.5 Blurred phoneme boundary embeddings (NEW in v3)
+
+**Motivation**: Hard per-frame phoneme assignments create sharp discontinuities in the embedding space at phoneme boundaries. In reality, speech transitions between phonemes are gradual — coarticulation means that a speaker's articulators are already moving toward the next phoneme before the current one ends. Blurred boundaries provide the model with a smoother, more physically realistic linguistic signal.
+
+**Design**: `BlurredPhonemeEmbedding` inherits from `PhonemeEmbedding` and overrides `forward()`. It reuses the same `nn.Embedding` table (no weight duplication). The interface is identical: `(B, T) int64 → (B, T, 64)`.
+
+**Algorithm** (computed at runtime in the forward pass):
+1. Look up base embeddings from the table: `emb = embedding(ids)`.
+2. Detect boundaries: frames where `ids[:, t] != ids[:, t+1]`.
+3. Compute per-segment durations (consecutive frame counts between boundaries).
+4. For each boundary between phoneme A (duration `d_A`) and phoneme B (duration `d_B`):
+   - `blend_radius = blend_fraction × min(d_A, d_B)` (default `blend_fraction=0.3`).
+   - On the A side of the boundary: weight toward B increases linearly from 0 to 0.5.
+   - On the B side of the boundary: weight toward A decreases linearly from 0.5 to 0.
+   - `blended = (1 - w) × emb_current + w × emb_neighbor`.
+
+**Duration-proportional scaling**: A 30ms stop consonant "t" (1.5 frames) gets a blend radius of ~0.45 frames (effectively 0–1 frame), preserving its sharp onset. A 500ms sustained vowel (25 frames) gets a ~7.5 frame blend region. This prevents over-smoothing short phonemes while giving long ones natural coarticulation.
+
+**CFG dropout interaction**: When `phoneme_ids` are zeroed out for CFG dropout, all frames have the same ID (0), so no boundaries are detected and blurring is a no-op. This is correct — the unconditional path should have no phoneme signal.
+
+**Disable**: Set `phoneme_blur_enabled=False` in config to use the original hard-lookup `PhonemeEmbedding`.
+
+### 5.6 Why narrow-and-deep instead of wide-and-shallow
 
 The v1 architecture was 2 layers, hidden_dim 1024, FFN 4096 (~35M params). This was found to overfit quickly, because the massive FFN layers act as lookup tables — they have enough capacity to memorize training examples without learning generalizable representations. v2 redistributes the same parameter budget across more sequential processing steps (6 layers, 512/2048), which acts as an implicit regularizer: the model has to do meaningful computation at every layer rather than caching answers.
 
@@ -328,8 +384,12 @@ Default `val_fraction = 0.2` (20% of songs).
 
 ## 11. Logging and Checkpointing
 
-- **Checkpoints** contain `step`, `model_state_dict` (live), `ema_model_state_dict`, `optimizer_state_dict`, and the full `config` dataclass. Saved every `save_every` (default 5000) steps. Inference loads the EMA dict if present.
-- **TensorBoard**: scalars `train/loss`, `train/lr`, `val/loss` written to `config.log_dir`. View with `tensorboard --logdir logs`.
+- **Run naming**: Each training run has a `run_name` (set via `--name` CLI flag, or auto-adopted from wandb). This name determines the subdirectory for checkpoints, configs, and logs.
+- **Checkpoints** saved to `checkpoints/<run_name>/checkpoint_{step}.pt`. Each contains `step`, `model_state_dict` (live), `ema_model_state_dict`, `optimizer_state_dict`, the full `config` dataclass, and `wandb_run_id`. Saved every `save_every` (default 5000) steps. Inference loads the EMA dict if present.
+- **Config snapshots** saved to `configs/<run_name>/config.yaml` on first launch (not overwritten on resume). Uses `VocaloFlowConfig.to_yaml()` / `from_yaml()`.
+- **Resume support**: Pass `--resume <run_name>` (or just `--name` with existing checkpoints). Auto-detects the latest checkpoint, restores model/EMA/optimizer state and step counter, and resumes the wandb run via its saved run ID.
+- **Checkpoint utilities** live in `training/checkpoint.py`: `find_latest_checkpoint()`, `save_checkpoint()`, `load_checkpoint()`.
+- **TensorBoard**: scalars `train/loss`, `train/lr`, `val/loss` written to `logs/<run_name>/`. View with `tensorboard --logdir logs`.
 - **Weights & Biases**: same scalars + gradient histograms via `wandb.watch`. Project = `archimedesli/VocaloFlow`.
 
 ---
@@ -384,7 +444,7 @@ For a batch size B and sequence length T = `max_seq_len = 256`:
 | Stage                          | Shape                  | Notes                              |
 |--------------------------------|------------------------|------------------------------------|
 | `phoneme_ids` (input)          | (B, 256)               | int64                              |
-| `phoneme_embed` output         | (B, 256, 64)           | after embedding lookup             |
+| `phoneme_embed` output         | (B, 256, 64)           | after embedding lookup (blurred or hard) |
 | `f0` (input)                   | (B, 256)               | float32                            |
 | `f0_embed` output              | (B, 256, 64)           | after MLP                          |
 | `x_t` (input)                  | (B, 256, 128)          | float32                            |
@@ -392,6 +452,10 @@ For a batch size B and sequence length T = `max_seq_len = 256`:
 | `voicing` (input)              | (B, 256)               | float32 (binary)                   |
 | Concatenated input             | (B, 256, 385)          | 128+128+64+64+1                    |
 | After `input_proj`             | (B, 256, 512)          | hidden representation              |
+| After ConvNeXt block 1         | (B, 256, 512)          | local features extracted           |
+| After ConvNeXt block 2         | (B, 256, 512)          | deeper local patterns              |
+| After ConvNeXt block 3         | (B, 256, 512)          | receptive field ~19 frames         |
+| After ConvNeXt block 4         | (B, 256, 512)          | receptive field ~25 frames (~500ms)|
 | `t` (input)                    | (B,)                   | float32 ∈ [0, 1]                   |
 | Sinusoidal timestep embedding  | (B, 256)               | (256 = sinusoidal_dim)             |
 | Conditioning vector `c`        | (B, 512)               | after timestep_mlp                 |
@@ -411,6 +475,9 @@ For a batch size B and sequence length T = `max_seq_len = 256`:
 - **EMA** — Exponential Moving Average of model weights. A smoothed version of the live model used for inference and validation; produces more stable, less noisy outputs than the live optimizer state.
 - **CFG** — Classifier-Free Guidance. Trains both a conditional and unconditional version of the model (via random conditioning dropout), then at inference interpolates between their predictions with a scale factor > 1 to amplify conditioning influence.
 - **Velocity field** — The function `v_θ(x_t, t, cond)` the model predicts. Integrating it from t=0 to t=1 gives the final mel.
+- **ConvNeXtV2** — A convolutional architecture using depthwise-separable convolutions with inverted bottleneck and Global Response Normalization (GRN). Used here as pre-processing blocks to capture local temporal patterns before the transformer.
+- **GRN** — Global Response Normalization. A normalization technique from ConvNeXtV2 that adds inter-channel competition by normalizing each channel relative to the L2 norm across the time dimension.
+- **Blurred phoneme boundaries** — Instead of a hard per-frame phoneme embedding lookup, boundary frames get a weighted average of adjacent phoneme embeddings. The blend region scales with phoneme duration, mimicking natural coarticulation.
 - **Phoneme indirection** — On disk, `phoneme_mask` stores per-frame indices into a per-chunk `phoneme_ids` array. The actual token is `phoneme_ids[phoneme_mask[t]]`. The dataset resolves this before producing the model input.
 - **Prior mel** — The Vocaloid-rendered mel-spectrogram (`x_0`). The starting point of the OT path.
 - **Target mel** — The high-quality singer mel-spectrogram (`x_1`). The endpoint of the OT path. Only available during training.

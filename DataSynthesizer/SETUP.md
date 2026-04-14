@@ -113,7 +113,7 @@ cd API/UtauGenerate
 dotnet build -c Release
 ```
 
-This produces `API/UtauGenerate/bin/Release/net9.0/UtauGenerate.dll`. The pipeline finds it automatically via the default path in `DataSynthesizer/config.py`.
+This produces `API/UtauGenerate/bin/Release/net9.0/UtauGenerate.dll`. The pipeline finds it automatically via the default path in `config.py` (repo root).
 
 ## 4. Create Conda Environments
 
@@ -168,7 +168,7 @@ conda run -n soulxsinger python -c "import torch; print(torch.__version__, 'cuda
 
 ## 5. Configure Paths (Optional)
 
-The pipeline resolves paths via `DataSynthesizer/config.py`, which reads from environment variables (or a `.env` file) with sensible defaults:
+The pipeline resolves paths via `config.py` (repo root), which reads from environment variables (or a `.env` file) with sensible defaults:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|

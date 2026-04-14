@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from typing import Optional
 
 
 @dataclass
@@ -26,8 +27,14 @@ class VocaloFlowConfig:
     head_dim: int = 64                  # hidden_dim // num_heads
     ffn_dim: int = 2048
     num_dit_blocks: int = 6
+    num_convnext_blocks: int = 4        # ConvNeXtV2 pre-processing blocks (0 = disable)
+    convnext_kernel_size: int = 7       # Depthwise conv kernel (7 @ 20ms/frame = 140ms)
     input_channels: int = 385           # 128 (x_t) + 128 (prior) + 64 (f0) + 64 (ph) + 1 (vuv)
     dropout: float = 0.1
+
+    # ── Phoneme Blurring ──────────────────────────────────────────────────
+    phoneme_blur_enabled: bool = False   # Use BlurredPhonemeEmbedding vs hard lookup
+    phoneme_blend_fraction: float = 0.2 # Blend radius as fraction of shorter phoneme duration
 
     # ── Training ──────────────────────────────────────────────────────────
     batch_size: int = 32
@@ -53,5 +60,24 @@ class VocaloFlowConfig:
     ode_method: str = "midpoint"        # "euler" or "midpoint"
 
     # ── Paths ─────────────────────────────────────────────────────────────
+    run_name: str = ""                  # Set via --name; determines checkpoint/config/log subdirs
     checkpoint_dir: str = "./checkpoints"
     log_dir: str = "./logs"
+
+    # ── YAML serialization ────────────────────────────────────────────────
+
+    def to_yaml(self, path: str) -> None:
+        """Save config as a YAML file."""
+        import yaml
+
+        with open(path, "w") as f:
+            yaml.dump(asdict(self), f, default_flow_style=False, sort_keys=False)
+
+    @classmethod
+    def from_yaml(cls, path: str) -> "VocaloFlowConfig":
+        """Load config from a YAML file."""
+        import yaml
+
+        with open(path) as f:
+            data = yaml.safe_load(f)
+        return cls(**data)

@@ -20,7 +20,7 @@ Top-level orchestration. Run as `python -m inference.pipeline ...` from the `Voc
 - `extract_or_load_f0(...)` — Priority order: (1) `--f0` `.npy` file, (2) RMVPE if checkpoint exists, (3) MIDI-pitch fallback.
 - `_lyric_to_word(lyric)` — Strips USTX bracket hints (`word[hint]`), maps continuation/rest tokens (`+`, `-`, `R`, `r`, empty) to `<SP>`.
 - `build_phoneme_ids(notes, ms_per_tick, total_frames, phoneset_path)` — Calls SoulX-Singer's `g2p_transform(words, lang="English")` to convert lyrics to `en_PH1-en_PH2-...` strings, then `_build_mel2note` to expand into per-frame phoneme IDs and a phoneme mask. Resolves phoneme indirection via VocaloFlow's `resolve_phoneme_indirection` and resamples to `total_frames` with `mode="nearest"`. Warns if the phoneme mask is empty.
-- `load_model(checkpoint_path, device)` — Loads a checkpoint with `weights_only=False`, instantiates `VocaloFlow(config)` from the embedded `config` (or default `VocaloFlowConfig`), and **prefers `ema_model_state_dict`** over `model_state_dict` if present.
+- `load_model(checkpoint_path, device)` — Loads a checkpoint with `weights_only=False`, instantiates `VocaloFlow(config)` from the embedded `config` (or default `VocaloFlowConfig`), and **prefers `ema_model_state_dict`** over `model_state_dict` if present. Uses `strict=False` to allow loading v2 checkpoints into v3 models (missing ConvNeXt keys are randomly initialized; logs missing/unexpected keys).
 - `infer_chunked(model, prior_mel, f0, voicing, phoneme_ids, chunk_size=256, overlap=16, num_steps=32, method="midpoint", device, cfg_scale=1.0)` — Splits the sequence into overlapping windows of size `chunk_size`, pads short tails to `chunk_size` (with a `padding_mask` so the model ignores the padding), runs `sample_ode` per chunk, and crossfades chunks via a linear ramp on the `overlap` frames at each side. For sequences shorter than one chunk, runs a single padded pass.
 - `mel_to_wav(mel)` — Transposes `(T, 128) -> (128, T)` and calls SoulX-Singer's `invert_mel_to_audio_soulxsinger` (Vocos) to produce 24 kHz audio.
 - `parse_args()` / `main()` — CLI driver. `main()` runs steps 1–10 in order and prints `[diag]` lines after every major stage (prior mel stats, F0/voicing, phoneme histogram, output mel vs prior mel diff, audio peak/RMS) so silent or no-op runs can be diagnosed quickly.
@@ -42,6 +42,7 @@ Top-level orchestration. Run as `python -m inference.pipeline ...` from the `Voc
 | `--phoneset` | `SoulX-Singer/soulxsinger/utils/phoneme/phone_set.json` | |
 | `--cfg-scale` | `2.0` | Classifier-free guidance; `1.0` disables CFG |
 | `--mask-phonemes` | off | Diagnostic flag: zeros out all phoneme IDs after `build_phoneme_ids`, removing linguistic conditioning. Useful for isolating the model's behavior driven by F0/voicing/prior alone. |
+| `--save-mels` | off | Saves `{stem}_prior_mel.npy` and `{stem}_mel.npy` alongside the output WAV (both `(T, 128)` float32 arrays in normalized log-mel space). Used by `DataAnalysis/mel_analysis.ipynb` for visualization. |
 
 ### `inference.py` — ODE sampler
 Single function: `sample_ode(model, x_0, f0, voicing, phoneme_ids, num_steps=32, method="midpoint", padding_mask=None, diagnostics=True, cfg_scale=1.0)`.

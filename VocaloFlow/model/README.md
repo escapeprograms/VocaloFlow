@@ -1,25 +1,28 @@
 # VocaloFlow Model Memory Palace
 
-Neural network architecture for the VocaloFlow conditional flow matching model (v2 — deeper/narrower with regularization).
+Neural network architecture for the VocaloFlow conditional flow matching model (v3 — ConvNeXt pre-processing + blurred phoneme boundaries).
 
 ## vocaloflow.py
 
 ### `VocaloFlow(config: VocaloFlowConfig)`
-Top-level nn.Module. Orchestrates all sub-components.
+Top-level nn.Module. Orchestrates all sub-components. ~37.6M params with defaults (29.2M without ConvNeXt).
 
 **Forward signature**: `forward(x_t, t, prior_mel, f0, voicing, phoneme_ids, padding_mask=None) -> Tensor`
 - Inputs: x_t (B,T,128), t (B,), prior_mel (B,T,128), f0 (B,T), voicing (B,T), phoneme_ids (B,T) int64, padding_mask (B,T) bool
 - Output: (B,T,128) predicted velocity vector
 
+**Constructor**: Selects `BlurredPhonemeEmbedding` or `PhonemeEmbedding` based on `config.phoneme_blur_enabled`. Creates `ConvNeXtStack` if `config.num_convnext_blocks > 0`, else `None`.
+
 **Forward flow**:
-1. `phoneme_embed(phoneme_ids)` → (B,T,64)
+1. `phoneme_embed(phoneme_ids)` → (B,T,64) — hard or blurred depending on config
 2. `f0_embed(f0)` → (B,T,64) via learned MLP
 3. Per-stream LayerNorm on x_t (128), prior_mel (128), f0_emb (64), ph_emb (64). vuv (1) passed raw.
 4. Concatenate all → (B,T,385)
 5. `input_proj` Linear(385,512) → (B,T,512)
-6. `timestep_mlp(t)` → (B,512) conditioning vector
-7. 6x `DiTBlock(h, c, mask)` → (B,T,512)
-8. `output_norm` + `output_proj` Linear(512,128) → (B,T,128)
+6. `convnext_stack(h)` → (B,T,512) — 4x ConvNeXtV2 blocks for local temporal features (skipped if None)
+7. `timestep_mlp(t)` → (B,512) conditioning vector
+8. 6x `DiTBlock(h, c, mask)` → (B,T,512)
+9. `output_norm` + `output_proj` Linear(512,128) → (B,T,128)
 
 ## dit_block.py
 
@@ -49,7 +52,32 @@ Sinusoidal(256) → Linear(256,512) → SiLU → Linear(512,512). Maps scalar ti
 Learned MLP for continuous F0 values: Linear(1,64) → SiLU → Linear(64,64). Maps (B,T) Hz values to (B,T,64) dense embeddings. Provides a richer pitch representation than a single raw channel.
 
 ### `PhonemeEmbedding(vocab_size=2820, embed_dim=64)`
-`nn.Embedding` lookup table with `padding_idx=0` (PAD token). Maps (B,T) int64 → (B,T,64). Reduced from 256 to 64 so phoneme identity doesn't dominate the input over the prior mel signal.
+Base class. `nn.Embedding` lookup table with `padding_idx=0` (PAD token). Maps (B,T) int64 → (B,T,64). Reduced from 256 to 64 so phoneme identity doesn't dominate the input over the prior mel signal.
+
+### `BlurredPhonemeEmbedding(PhonemeEmbedding)` — extends PhonemeEmbedding
+Adds duration-proportional boundary blending. Near phoneme boundaries, produces a weighted average of adjacent phoneme embeddings instead of hard lookup. Same interface: (B,T) int64 → (B,T,64).
+
+**Algorithm**: Detects boundaries where `ids[:, t] != ids[:, t+1]`, computes per-segment durations, then creates linear blend regions of radius `blend_fraction * min(left_dur, right_dur)` around each boundary. Max blend weight is 0.5 at the boundary itself, tapering to 0 at the edges of the blend window.
+
+**Key properties**:
+- `blend_fraction` (float, default 0.3): controls blend region size relative to shorter phoneme duration
+- Reuses `self.embedding` from parent class (no weight duplication)
+- All-same IDs (e.g., CFG dropout zeros) produce no blurring (correct for unconditional path)
+- Short phonemes get proportionally smaller blend windows
+- Toggled via `config.phoneme_blur_enabled`
+
+## convnext.py
+
+### `GlobalResponseNorm(dim)`
+ConvNeXtV2's inter-channel normalization. Computes per-channel L2 norm across time, normalizes by mean norm, applies learnable scale (`gamma`) and shift (`beta`), plus residual. Initialized to identity (gamma=0, beta=0).
+
+### `ConvNeXtV2Block(dim=512, kernel_size=7, expansion=4, dropout=0.1)`
+Single ConvNeXtV2 block: depthwise Conv1d (channels-first) → LayerNorm → pointwise expand (4x) → GELU → GRN → pointwise project → dropout → residual. ~2.1M params per block.
+
+Kernel size 7 at 20ms/frame covers ~140ms — the duration of a consonant cluster or fast syllable transition.
+
+### `ConvNeXtStack(dim=512, num_blocks=4, kernel_size=7, expansion=4, dropout=0.1)`
+Sequential stack of ConvNeXtV2Blocks. With 4 blocks, effective receptive field is ~25 frames (~500ms). Does NOT receive timestep conditioning — processes input features independently of flow position. ~8.4M params total.
 
 ## rope.py
 

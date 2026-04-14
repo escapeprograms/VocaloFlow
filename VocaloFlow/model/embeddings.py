@@ -87,7 +87,7 @@ class F0Embedding(nn.Module):
 
 
 class PhonemeEmbedding(nn.Module):
-    """Learned embedding table for phoneme token IDs.
+    """Learned embedding table for phoneme token IDs (hard lookup).
 
     Args:
         vocab_size: Number of phoneme tokens (default 2820).
@@ -108,3 +108,132 @@ class PhonemeEmbedding(nn.Module):
             (B, T, embed_dim) dense embeddings.
         """
         return self.embedding(ids)
+
+
+class BlurredPhonemeEmbedding(PhonemeEmbedding):
+    """Phoneme embedding with duration-proportional boundary blending.
+
+    Near phoneme boundaries, produces a weighted average of adjacent phoneme
+    embeddings instead of a hard lookup. The blend region scales with the
+    shorter adjacent phoneme's duration, so short consonants get small blend
+    windows and long vowels get larger ones.
+
+    Args:
+        vocab_size: Number of phoneme tokens (default 2820).
+        embed_dim: Output embedding dimension (default 64).
+        blend_fraction: Fraction of shorter adjacent phoneme's duration used
+            as blend radius on each side of the boundary (default 0.3).
+    """
+
+    def __init__(
+        self,
+        vocab_size: int = 2820,
+        embed_dim: int = 64,
+        blend_fraction: float = 0.3,
+    ) -> None:
+        super().__init__(vocab_size, embed_dim)
+        self.blend_fraction = blend_fraction
+
+    def forward(self, ids: Tensor) -> Tensor:
+        """Look up phoneme embeddings with boundary blurring.
+
+        Args:
+            ids: (B, T) int64 phoneme token IDs.
+
+        Returns:
+            (B, T, embed_dim) blurred embeddings.
+        """
+        # Base embeddings from parent's table
+        emb = self.embedding(ids)  # (B, T, D)
+
+        if self.blend_fraction <= 0.0:
+            return emb
+
+        B, T, D = emb.shape
+        if T < 2:
+            return emb
+
+        # Detect boundaries: positions where the next frame has a different phoneme
+        # boundary_mask[:, t] = True means ids[:, t] != ids[:, t+1]
+        boundary_mask = ids[:, :-1] != ids[:, 1:]  # (B, T-1)
+
+        # Build blend weights for each sample in the batch
+        blend_weights = torch.zeros(B, T, device=ids.device, dtype=emb.dtype)
+        # neighbor_ids: for each frame, the phoneme to blend toward
+        # (defaults to same as current = no blend)
+        neighbor_ids = ids.clone()
+
+        for b in range(B):
+            boundary_positions = boundary_mask[b].nonzero(as_tuple=True)[0]  # 1D
+            if boundary_positions.numel() == 0:
+                continue
+
+            # Compute segment durations from boundary positions
+            # Segments are: [0, bp0], [bp0+1, bp1], ..., [bpN+1, T-1]
+            bp = boundary_positions
+            seg_starts = torch.cat([
+                bp.new_zeros(1),
+                bp + 1,
+            ])
+            seg_ends = torch.cat([
+                bp + 1,
+                bp.new_full((1,), T),
+            ])
+            seg_durations = seg_ends - seg_starts  # (num_segments,)
+
+            # For each boundary, compute blend radius from adjacent segment durations
+            # boundary i is between segment i and segment i+1
+            for i, bp_pos in enumerate(boundary_positions):
+                left_dur = seg_durations[i].item()
+                right_dur = seg_durations[i + 1].item()
+                radius = self.blend_fraction * min(left_dur, right_dur)
+
+                if radius < 0.5:
+                    continue  # Too small to affect any frame
+
+                radius_int = max(1, int(round(radius)))
+
+                # Left side of boundary: frames in phoneme A blending toward B
+                left_start = max(0, bp_pos.item() + 1 - radius_int)
+                left_end = bp_pos.item() + 1  # exclusive; bp_pos is last frame of phoneme A
+                if left_end > left_start:
+                    positions = torch.arange(left_start, left_end, device=ids.device)
+                    # Linear ramp: 0 at left_start -> 0.5 at boundary
+                    weights = 0.5 * (positions - left_start + 1).float() / radius_int
+                    # Clamp to max 0.5
+                    weights = weights.clamp(max=0.5)
+                    # Only apply if stronger than existing weight at that position
+                    existing = blend_weights[b, left_start:left_end]
+                    mask = weights > existing
+                    blend_weights[b, left_start:left_end] = torch.where(
+                        mask, weights, existing
+                    )
+                    # Neighbor for left-side frames is the right phoneme
+                    right_phoneme_id = ids[b, bp_pos + 1]
+                    neighbor_ids[b, left_start:left_end] = torch.where(
+                        mask, right_phoneme_id, neighbor_ids[b, left_start:left_end]
+                    )
+
+                # Right side of boundary: frames in phoneme B blending toward A
+                right_start = bp_pos.item() + 1
+                right_end = min(T, right_start + radius_int)
+                if right_end > right_start:
+                    positions = torch.arange(right_start, right_end, device=ids.device)
+                    # Linear ramp: 0.5 at boundary -> 0 at right_end
+                    weights = 0.5 * (right_end - positions).float() / radius_int
+                    weights = weights.clamp(max=0.5)
+                    existing = blend_weights[b, right_start:right_end]
+                    mask = weights > existing
+                    blend_weights[b, right_start:right_end] = torch.where(
+                        mask, weights, existing
+                    )
+                    # Neighbor for right-side frames is the left phoneme
+                    left_phoneme_id = ids[b, bp_pos]
+                    neighbor_ids[b, right_start:right_end] = torch.where(
+                        mask, left_phoneme_id, neighbor_ids[b, right_start:right_end]
+                    )
+
+        # Look up neighbor embeddings and blend
+        neighbor_emb = self.embedding(neighbor_ids)  # (B, T, D)
+        w = blend_weights.unsqueeze(-1)  # (B, T, 1)
+        return (1.0 - w) * emb + w * neighbor_emb

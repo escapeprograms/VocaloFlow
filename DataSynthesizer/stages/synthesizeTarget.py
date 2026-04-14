@@ -6,8 +6,11 @@ import argparse
 import re
 from pathlib import Path
 
-# Add DataSynthesizer root to path for cross-package imports
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# Add DataSynthesizer root and repo root to path for cross-package imports
+_DS_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_REPO_ROOT = os.path.abspath(os.path.join(_DS_ROOT, ".."))
+sys.path.insert(0, _DS_ROOT)
+sys.path.insert(0, _REPO_ROOT)
 
 from config import SOULX_PYTHON
 

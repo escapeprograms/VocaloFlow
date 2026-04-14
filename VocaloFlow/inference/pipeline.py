@@ -34,6 +34,10 @@ _REPO_ROOT = os.path.abspath(os.path.join(_VOCALOFLOW_DIR, ".."))
 _DATASYNTHESIZER_DIR = os.path.join(_REPO_ROOT, "DataSynthesizer")
 _SOULX_DIR = os.path.join(_REPO_ROOT, "SoulX-Singer")
 
+# Add repo root to path for shared config
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 # Add VocaloFlow and SoulX-Singer to path (but NOT DataSynthesizer, whose
 # "utils" package would shadow VocaloFlow's own "utils").
 for _p in [_VOCALOFLOW_DIR, _SOULX_DIR]:
@@ -156,13 +160,17 @@ def render_ustx_to_wav(ustx_path: str, notes_data: dict, output_wav: str) -> str
     Falls back with a clear error if pythonnet is not available.
     """
     try:
+        from config import UTAU_GENERATE_DLL
+        import pythonnet
+        pythonnet.load("coreclr")
         import clr
-        dll_path = os.path.join(_REPO_ROOT, "API", "UtauGenerate", "bin", "Release",
-                                "net8.0", "UtauGenerate.dll")
-        if not os.path.exists(dll_path):
-            dll_path = os.path.join(_REPO_ROOT, "API", "UtauGenerate", "bin", "Debug",
-                                    "net8.0", "UtauGenerate.dll")
-        clr.AddReference(dll_path)
+
+        # Add DLL directory to PATH so native deps (e.g. onnxruntime.dll) are found
+        bin_dir = os.path.dirname(UTAU_GENERATE_DLL)
+        native_dir = os.path.join(bin_dir, "runtimes", "win-x64", "native")
+        os.environ["PATH"] = bin_dir + os.pathsep + native_dir + os.pathsep + os.environ.get("PATH", "")
+
+        clr.AddReference(UTAU_GENERATE_DLL)
         from UtauGenerate import Player
     except Exception as e:
         raise RuntimeError(
@@ -348,13 +356,19 @@ def load_model(checkpoint_path: str, device: torch.device) -> VocaloFlow:
     model = VocaloFlow(config).to(device)
 
     state_key = "ema_model_state_dict" if "ema_model_state_dict" in ckpt else "model_state_dict"
-    model.load_state_dict(ckpt[state_key])
+    missing, unexpected = model.load_state_dict(ckpt[state_key], strict=False)
     model.eval()
 
     step = ckpt.get("step", "?")
     param_count = sum(p.numel() for p in model.parameters())
     print(f"[pipeline] Loaded model from step {step} ({param_count:,} params, "
           f"using {state_key})")
+    if missing:
+        print(f"[pipeline] Randomly initialized keys (not in checkpoint): "
+              f"{len(missing)} — {missing[:5]}{'...' if len(missing) > 5 else ''}")
+    if unexpected:
+        print(f"[pipeline] Unexpected keys in checkpoint (ignored): "
+              f"{len(unexpected)} — {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
     return model
 
 
@@ -502,6 +516,8 @@ def parse_args() -> argparse.Namespace:
                    help="Classifier-free guidance scale (1.0 = no guidance)")
     p.add_argument("--mask-phonemes", action="store_true",
                    help="Zero out all phoneme IDs (diagnostic: removes linguistic conditioning)")
+    p.add_argument("--save-mels", action="store_true",
+                   help="Save prior and output mel spectrograms as .npy alongside output WAV")
     return p.parse_args()
 
 
@@ -601,6 +617,16 @@ def main():
     print(f"[diag] output_mel near-silent frames: {_out_silent}/{T} "
           f"({_out_silent / max(T, 1) * 100:.1f}%)")
 
+    # Ensure output directory exists (needed for both mel saves and final WAV)
+    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+
+    # Save mel spectrograms if requested
+    if args.save_mels:
+        stem = os.path.splitext(os.path.abspath(args.output))[0]
+        np.save(f"{stem}_prior_mel.npy", prior_mel)
+        np.save(f"{stem}_mel.npy", output_mel)
+        print(f"[pipeline] Saved mel spectrograms: {stem}_prior_mel.npy, {stem}_mel.npy")
+
     # Step 9: Vocoder
     audio = mel_to_wav(output_mel)
 
@@ -611,7 +637,6 @@ def main():
 
     # Step 10: Save output
     import soundfile as sf
-    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     sf.write(args.output, audio, SR)
     print(f"[pipeline] Saved output to {args.output} "
           f"({len(audio) / SR:.2f}s @ {SR}Hz)")

@@ -1,0 +1,5 @@
+num_dit_blocks: 4
+num_convnext_blocks: 12
+
+phoneme_blur_enabled: false
+phoneme_blend_fraction: 0.2
