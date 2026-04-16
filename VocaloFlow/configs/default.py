@@ -1,4 +1,4 @@
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Optional
 
 
@@ -36,6 +36,15 @@ class VocaloFlowConfig:
     phoneme_blur_enabled: bool = False   # Use BlurredPhonemeEmbedding vs hard lookup
     phoneme_blend_fraction: float = 0.2 # Blend radius as fraction of shorter phoneme duration
 
+    # ── WaveNet Pre-processing ────────────────────────────────────────────
+    # Optional alternative to ConvNeXt. Dilated conv + gated activation with
+    # per-layer timestep conditioning (DiffSinger/PWG style). 0 = disabled.
+    num_wavenet_blocks: int = 0
+    wavenet_kernel_size: int = 3
+    wavenet_dilation_cycle: int = 4      # dilations: 1, 2, 4, 8 repeating
+    wavenet_skip_channels: int = 512     # drop to 256 to save params if needed
+    wavenet_dropout: float = 0.1
+
     # ── Training ──────────────────────────────────────────────────────────
     batch_size: int = 32
     learning_rate: float = 1e-4
@@ -54,6 +63,17 @@ class VocaloFlowConfig:
 
     # ── Flow Matching ─────────────────────────────────────────────────────
     sigma_min: float = 1e-4
+
+    # ── STFT Auxiliary Loss ───────────────────────────────────────────────
+    stft_loss_enabled: bool = False
+    stft_loss_lambda: float = 0.1
+    # (n_fft, hop, win) per resolution, operating on the mel time axis.
+    # List-of-lists (not tuples) so YAML safe_load round-trips cleanly.
+    stft_resolutions: list = field(default_factory=lambda: [
+        [16, 4, 16],
+        [32, 8, 32],
+        [64, 16, 64],
+    ])
 
     # ── Inference ─────────────────────────────────────────────────────────
     num_ode_steps: int = 32

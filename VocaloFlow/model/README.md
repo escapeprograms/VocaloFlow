@@ -1,17 +1,17 @@
 # VocaloFlow Model Memory Palace
 
-Neural network architecture for the VocaloFlow conditional flow matching model (v3 — ConvNeXt pre-processing + blurred phoneme boundaries).
+Neural network architecture for the VocaloFlow conditional flow matching model (v4 — optional ConvNeXt and/or WaveNet pre-processing, with blurred phoneme boundaries).
 
 ## vocaloflow.py
 
 ### `VocaloFlow(config: VocaloFlowConfig)`
-Top-level nn.Module. Orchestrates all sub-components. ~37.6M params with defaults (29.2M without ConvNeXt).
+Top-level nn.Module. Orchestrates all sub-components. Baseline (no pre-processing) ~26M params. Adding ConvNeXt adds ~8.4M. Adding WaveNet (8 blocks, skip=512) adds ~21.7M.
 
 **Forward signature**: `forward(x_t, t, prior_mel, f0, voicing, phoneme_ids, padding_mask=None) -> Tensor`
 - Inputs: x_t (B,T,128), t (B,), prior_mel (B,T,128), f0 (B,T), voicing (B,T), phoneme_ids (B,T) int64, padding_mask (B,T) bool
 - Output: (B,T,128) predicted velocity vector
 
-**Constructor**: Selects `BlurredPhonemeEmbedding` or `PhonemeEmbedding` based on `config.phoneme_blur_enabled`. Creates `ConvNeXtStack` if `config.num_convnext_blocks > 0`, else `None`.
+**Constructor**: Selects `BlurredPhonemeEmbedding` or `PhonemeEmbedding` based on `config.phoneme_blur_enabled`. Creates `ConvNeXtStack` if `config.num_convnext_blocks > 0` else `None`. Creates `WaveNetStack` if `config.num_wavenet_blocks > 0` else `None`. Both pre-processors can independently toggle on or off; if both are on, ConvNeXt runs first.
 
 **Forward flow**:
 1. `phoneme_embed(phoneme_ids)` → (B,T,64) — hard or blurred depending on config
@@ -19,8 +19,9 @@ Top-level nn.Module. Orchestrates all sub-components. ~37.6M params with default
 3. Per-stream LayerNorm on x_t (128), prior_mel (128), f0_emb (64), ph_emb (64). vuv (1) passed raw.
 4. Concatenate all → (B,T,385)
 5. `input_proj` Linear(385,512) → (B,T,512)
-6. `convnext_stack(h)` → (B,T,512) — 4x ConvNeXtV2 blocks for local temporal features (skipped if None)
-7. `timestep_mlp(t)` → (B,512) conditioning vector
+6. `timestep_mlp(t)` → (B,512) conditioning vector `c` (computed before pre-processors so WaveNet can consume it)
+7a. `convnext_stack(h)` → (B,T,512) — optional local temporal features (skipped if None)
+7b. `h = h + wavenet_stack(h, c)` — optional timestep-conditioned WaveNet residuals with outer skip (skipped if None)
 8. 6x `DiTBlock(h, c, mask)` → (B,T,512)
 9. `output_norm` + `output_proj` Linear(512,128) → (B,T,128)
 
@@ -78,6 +79,18 @@ Kernel size 7 at 20ms/frame covers ~140ms — the duration of a consonant cluste
 
 ### `ConvNeXtStack(dim=512, num_blocks=4, kernel_size=7, expansion=4, dropout=0.1)`
 Sequential stack of ConvNeXtV2Blocks. With 4 blocks, effective receptive field is ~25 frames (~500ms). Does NOT receive timestep conditioning — processes input features independently of flow position. ~8.4M params total.
+
+## wavenet.py
+
+Optional pre-processing stack alternative to ConvNeXt. Follows the non-causal WaveNet denoiser of Parallel WaveGAN / DiffSinger: dilated convolutions with gated (tanh * sigmoid) activations, per-layer timestep conditioning injected before the gate, and accumulated skip connections. Channels-first internally; transposes only at the outer boundary.
+
+### `WaveNetResidualBlock(channels, cond_channels, skip_channels, kernel_size, dilation, dropout=0.1)`
+Single residual block. Pipeline: input dropout → dilated Conv1d(C→2C, same-padding) → add per-block conditioning Conv1x1(C_cond→2C) → split into (xa, xb) → `tanh(xa) * sigmoid(xb)` → 1x1 skip and 1x1 out projections → residual add scaled by `sqrt(0.5)`. Returns `(x_out, skip)`. Conditioning projection is per-block (not shared) so different layers can specialise in different timestep regimes.
+
+### `WaveNetStack(hidden_channels=512, cond_channels=512, skip_channels=512, kernel_size=3, n_layers=8, dilation_cycle=4, dropout=0.1)`
+Input 1x1 → N residual blocks with cyclic dilations (`2 ** (i % dilation_cycle)`) → ReLU(skip_sum) → Conv1x1 → ReLU → Conv1x1 → output. Takes `(x: (B,T,C), cond: (B,C_cond))`, broadcasts cond across T, and returns `(B,T,C)`. Callers wrap with an outer residual `h = h + wavenet_stack(h, c)` so the DiT blocks see the raw projected input at init time. All Conv1d weights initialised Kaiming-normal (relu). Default 8 blocks at skip=512 ≈ 21.7M params.
+
+**Toggle**: `config.num_wavenet_blocks = 0` disables entirely (stack is `None`). Does not conflict with `num_convnext_blocks`.
 
 ## rope.py
 

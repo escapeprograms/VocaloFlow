@@ -82,7 +82,7 @@ conda activate vocaloflow
 python -m training.train --name my-experiment
 
 # Fresh run with YAML hyperparameter overrides
-python -m training.train --name 4-13-deep-convnet --config configs/cur_config.yaml
+python -m training.train --name 4-15-wavenet --config configs/cur_config.yaml
 
 # Resume (auto-detects latest checkpoint; architecture config is pulled from the checkpoint)
 python -m training.train --resume my-experiment
@@ -119,8 +119,14 @@ From the `VocaloFlow/` directory:
 Test script:
 python -m inference.pipeline 
     --ustx "../demo/let_it_go/let_it_go.ustx" 
-    --checkpoint "checkpoints/4-13-deep-convnet/checkpoint_10000.pt" 
-    --output "../demo/let_it_go/4-13-deep-convnet/output.wav"
+    --checkpoint "checkpoints/4-15-wavenet/checkpoint_30000.pt" 
+    --output "../demo/let_it_go/4-15-wavenet/output.wav"
+    --save-mels
+
+python -m inference.pipeline 
+    --ustx "../demo/we_are_charlie/we_are_charlie.ustx" 
+    --checkpoint "checkpoints/4-15-wavenet/checkpoint_30000.pt" 
+    --output "../demo/we_are_charlie/4-15-wavenet/output.wav"
     --save-mels
 
 

@@ -66,9 +66,9 @@ A single tensor of shape `(B, T, 128)`, float32 — the predicted **velocity fie
 
 ---
 
-## 5. Architecture (v3)
+## 5. Architecture (v4)
 
-VocaloFlow is a **6-layer Diffusion Transformer (DiT)** with **4 ConvNeXtV2 pre-processing blocks**, rotary position embeddings, AdaLN-Zero conditioning, per-stream input normalization, and **blurred phoneme boundary embeddings**. Total parameter count: **~37.6 million** (~29.2M DiT + embeddings, ~8.4M ConvNeXt).
+VocaloFlow is a **6-layer Diffusion Transformer (DiT)** with **optional ConvNeXt and/or WaveNet pre-processing blocks**, rotary position embeddings, AdaLN-Zero conditioning, per-stream input normalization, and **blurred phoneme boundary embeddings**. Parameter counts by configuration: ~29.2M baseline (DiT + embeddings only), ~37.6M with 4 ConvNeXt blocks, ~51.0M with 8 WaveNet blocks. Both pre-processors can be independently toggled; they are not mutually exclusive.
 
 ### 5.1 Key dimensions
 
@@ -81,6 +81,11 @@ VocaloFlow is a **6-layer Diffusion Transformer (DiT)** with **4 ConvNeXtV2 pre-
 | `num_dit_blocks`       |     6 | Stacked transformer layers                       |
 | `num_convnext_blocks`  |     4 | ConvNeXtV2 pre-processing blocks (0 = disable)   |
 | `convnext_kernel_size` |     7 | Depthwise conv kernel (7 frames = 140ms)         |
+| `num_wavenet_blocks`   |     0 | WaveNet residual pre-processing blocks (0 = disable) |
+| `wavenet_kernel_size`  |     3 | Dilated conv kernel                              |
+| `wavenet_dilation_cycle`|    4 | Dilation repeats: 1, 2, 4, 8                     |
+| `wavenet_skip_channels`|   512 | Skip connection width (256 to save params)       |
+| `wavenet_dropout`      |   0.1 | Dropout at each WaveNet residual block input     |
 | `phoneme_embed_dim`    |    64 | Per-token phoneme embedding width                |
 | `f0_embed_dim`         |    64 | Learned F0 embedding width                       |
 | `dropout`              |   0.1 | Applied in every DiT + ConvNeXt block            |
@@ -118,15 +123,24 @@ Each input stream is independently normalized **before** concatenation:
 **Step 5 — Input projection**
 `Linear(385, 512)` → `(B, T, 512)`. This is a plain Linear layer (acts as Conv1d with kernel=1).
 
-**Step 6 — ConvNeXt pre-processing (NEW in v3)**
-4× ConvNeXtV2 blocks, each: depthwise Conv1d (kernel=7, groups=512) → LayerNorm → pointwise expand (512→2048) → GELU → GRN → pointwise project (2048→512) → dropout → residual. See section 5.4 for details.
+**Step 6 — Timestep conditioning vector**
+`t: (B,)` → sinusoidal embedding (256 dims, max_period=10000) → `Linear(256, 512) → SiLU → Linear(512, 512)` → `(B, 512)`. This vector `c` is computed **before** the pre-processing blocks so the WaveNet stack can consume it. It also modulates every DiT block via AdaLN-Zero (see 5.3). The sinusoidal embedding gives the model a continuous, smoothly-varying representation of t ∈ [0, 1].
+
+**Step 7a — ConvNeXt pre-processing (optional)**
+If `num_convnext_blocks > 0`: N× ConvNeXtV2 blocks, each: depthwise Conv1d (kernel=7, groups=512) → LayerNorm → pointwise expand (512→2048) → GELU → GRN → pointwise project (2048→512) → dropout → residual. See section 5.4 for details.
 
 These blocks capture **local temporal patterns** — consonants and fast spectral transitions that span only 1–4 frames (5–20ms) — before the transformer processes them. The transformer's self-attention treats all positions equally, which is good for global structure but smooths over short-timescale phonetic events. The convolutional pre-processing addresses this.
 
-ConvNeXt blocks do **NOT** receive timestep conditioning. They process the input features independently of where on the flow path the model is. Only the DiT blocks are timestep-conditioned via AdaLN-Zero. This is intentional: the convolutional blocks prepare the conditioning signal, the transformer blocks do the flow matching.
+ConvNeXt blocks do **NOT** receive timestep conditioning. They process the input features independently of where on the flow path the model is.
 
-**Step 7 — Timestep conditioning vector**
-`t: (B,)` → sinusoidal embedding (256 dims, max_period=10000) → `Linear(256, 512) → SiLU → Linear(512, 512)` → `(B, 512)`. This vector `c` modulates every transformer block via AdaLN-Zero (see 5.3). The sinusoidal embedding gives the model a continuous, smoothly-varying representation of t ∈ [0, 1].
+**Step 7b — WaveNet pre-processing (optional, NEW in v4)**
+If `num_wavenet_blocks > 0`: N× WaveNet residual blocks with dilated non-causal convolutions, gated activations (tanh · sigmoid), and per-layer timestep conditioning. See section 5.6 for details.
+
+Unlike ConvNeXt, the WaveNet stack **receives the timestep conditioning vector `c`** at every layer. This is important because the velocity field changes character across the flow path — at low `t` (near prior) the model makes large adjustments, at high `t` (near target) it refines details. Gated activations can learn to modulate their behavior based on `t`.
+
+The WaveNet output is wrapped in an **outer residual connection**: `h = h + wavenet_stack(h, c)`. This ensures that early in training (when the stack is randomly initialized), the DiT blocks still receive the raw projected input and can function normally. As training progresses, the stack learns to contribute useful features additively.
+
+If both ConvNeXt and WaveNet are enabled, ConvNeXt runs first (step 7a), then WaveNet operates on its output (step 7b). In practice, experiments run one or the other, not both.
 
 **Step 8 — 6× DiT block**
 Each block consumes `(B, T, 512)` hidden states and the conditioning vector `(B, 512)`, and produces `(B, T, 512)`. See 5.3 for what happens inside.
@@ -200,7 +214,40 @@ The dropout in steps 7 and (FFN-)4 is the **only** stochastic regularization in 
 
 **Disable**: Set `phoneme_blur_enabled=False` in config to use the original hard-lookup `PhonemeEmbedding`.
 
-### 5.6 Why narrow-and-deep instead of wide-and-shallow
+### 5.6 WaveNet pre-processing blocks (NEW in v4)
+
+**Motivation**: ConvNeXt blocks (section 5.4) use depthwise convolutions (no cross-channel mixing in the conv), GELU activation (smooth, no selective gating), a fixed small receptive field per layer (kernel 7), and receive no timestep conditioning. Testing with 4 and 12 ConvNeXt blocks showed no meaningful improvement in consonant clarity. DiffSinger (Liu et al., AAAI 2022), which achieves sharp, non-smoothed output at similar scale, uses a WaveNet-style residual denoiser derived from Parallel WaveGAN (Yamamoto et al., ICASSP 2020).
+
+**Architecture**: N WaveNet residual blocks stacked in a `WaveNetStack`, with accumulated skip connections and cyclic dilations.
+
+**Single residual block pipeline** (`WaveNetResidualBlock`):
+1. **Dropout(p=0.1)** at input.
+2. **Dilated Conv1d** — `Conv1d(512, 1024, kernel=3, dilation=d)`, non-causal with symmetric padding `(kernel-1)//2 * d`. Standard (NOT depthwise) convolution — full cross-channel mixing at every layer.
+3. **Add conditioning** — a per-block `Conv1x1(512, 1024)` projects the timestep vector (broadcast across T) and adds it element-wise. Each block has its **own** 1x1 projection (NOT shared), so different layers can specialise in different timestep regimes.
+4. **Gated activation** — split into two halves along the channel dim: `tanh(xa) * sigmoid(xb)`. The sigmoid branch acts as a binary gate that can learn "pass this transient through" vs "smooth this sustained region" — a capability that GELU lacks.
+5. **Skip projection** — `Conv1x1(512, skip_channels)`. Output accumulated across all layers.
+6. **Output projection** — `Conv1x1(512, 512)`.
+7. **Residual connection** — `out = (projected + residual) * sqrt(0.5)`. The `sqrt(0.5)` scaling (from Parallel WaveGAN) prevents magnitude growth through the stack.
+
+**Dilation pattern**: Cyclic with period `dilation_cycle` (default 4). Layer `i` uses dilation `2^(i % 4)`, giving dilations [1, 2, 4, 8, 1, 2, 4, 8] for 8 layers. Each cycle covers a receptive field of `2 * (1+2+4+8) = 30` frames (~600ms). Two cycles (8 layers) gives an effective field of ~60 frames (~1.2 seconds).
+
+**Stack-level structure** (`WaveNetStack`):
+1. Input `Conv1x1(512, 512)` — entry projection (identity-like when dims match, follows PWG convention).
+2. N residual blocks with cyclic dilations — each outputs `(x_next, skip)`.
+3. Sum all skip outputs → ReLU → `Conv1x1(512, 512)` → ReLU → `Conv1x1(512, 512)` → output.
+4. Outer residual in the model: `h = h + wavenet_stack(h, c)`.
+
+**Channels convention**: The rest of VocaloFlow uses channels-last `(B, T, C)`. The WaveNet stack transposes to channels-first `(B, C, T)` at entry and back at exit. All internal operations use channels-first. The transpose happens only at the outer boundary, not per-block.
+
+**Weight initialization**: All Conv1d layers use Kaiming-normal (`nonlinearity="relu"`) with zero bias. This differs from PyTorch defaults and is important for the gated activation pattern.
+
+**Parameter count**: ~2.62M per block. 8 blocks + stack overhead ≈ 21.7M. Total model with 8 WaveNet blocks: ~51.0M.
+
+**Padding mask**: The dilated convolutions do not explicitly apply the padding mask. Padded frames may be slightly contaminated by convolution, but they are masked out in the loss function — consistent with how ConvNeXt handles padding.
+
+**Disable**: Set `num_wavenet_blocks=0` in config (the default). Does not conflict with `num_convnext_blocks`.
+
+### 5.7 Why narrow-and-deep instead of wide-and-shallow
 
 The v1 architecture was 2 layers, hidden_dim 1024, FFN 4096 (~35M params). This was found to overfit quickly, because the massive FFN layers act as lookup tables — they have enough capacity to memorize training examples without learning generalizable representations. v2 redistributes the same parameter budget across more sequential processing steps (6 layers, 512/2048), which acts as an implicit regularizer: the model has to do meaningful computation at every layer rather than caching answers.
 
@@ -291,7 +338,7 @@ v_guided = v_uncond + cfg_scale · (v_cond - v_uncond)
 
 | Technique           | Where             | Strength | Purpose                                          |
 |---------------------|-------------------|---------:|--------------------------------------------------|
-| Dropout             | Every DiT block (attn out, FFN out) | p=0.1 | Generic transformer regularization        |
+| Dropout             | Every DiT block (attn out, FFN out), every WaveNet block (input) | p=0.1 | Generic regularization        |
 | CFG dropout         | Loss function     | p=0.2  | Trains unconditional path, prevents over-reliance on any single conditioning signal |
 | Weight decay        | AdamW optimizer   | 0.01   | L2 regularization                                |
 | Gradient clipping   | After backward    | norm=1 | Prevents loss spikes during early training        |
@@ -434,6 +481,7 @@ Every issue observed during development falls into one of these patterns. If val
 4. **Wide-and-shallow architecture overfits (v1)** — 2 layers × 1024 hidden × 4096 FFN memorized too easily. Fixed by going to 6 × 512 × 2048 (similar param count, much more sequential depth).
 5. **F0 underparameterized (v1)** — single channel of raw Hz values. Fixed by learned 64-dim F0 embedding.
 6. **`max_dtw_cost=200` admitted bad alignments (v1)** — Lowered to 100 in v2 to filter more aggressively for high-quality pairs.
+7. **Channels-first/last confusion (v4 risk)** — The WaveNet stack operates in channels-first `(B,C,T)` while the rest of the pipeline uses channels-last `(B,T,C)`. Transposes happen only at the `WaveNetStack` boundary, not inside each block. If adding new modules that interact with the WaveNet internals, ensure the convention matches.
 
 ---
 
@@ -452,13 +500,13 @@ For a batch size B and sequence length T = `max_seq_len = 256`:
 | `voicing` (input)              | (B, 256)               | float32 (binary)                   |
 | Concatenated input             | (B, 256, 385)          | 128+128+64+64+1                    |
 | After `input_proj`             | (B, 256, 512)          | hidden representation              |
-| After ConvNeXt block 1         | (B, 256, 512)          | local features extracted           |
-| After ConvNeXt block 2         | (B, 256, 512)          | deeper local patterns              |
-| After ConvNeXt block 3         | (B, 256, 512)          | receptive field ~19 frames         |
-| After ConvNeXt block 4         | (B, 256, 512)          | receptive field ~25 frames (~500ms)|
 | `t` (input)                    | (B,)                   | float32 ∈ [0, 1]                   |
 | Sinusoidal timestep embedding  | (B, 256)               | (256 = sinusoidal_dim)             |
-| Conditioning vector `c`        | (B, 512)               | after timestep_mlp                 |
+| Conditioning vector `c`        | (B, 512)               | after timestep_mlp (computed before pre-procs) |
+| After ConvNeXt block 1–4 (opt) | (B, 256, 512)          | local features, RF ~25 frames      |
+| WaveNet internal (opt)         | (B, 512, 256)          | channels-first inside the stack    |
+| WaveNet skip accumulation (opt)| (B, 512, 256)          | sum of per-block skip outputs      |
+| After WaveNet stack (opt)      | (B, 256, 512)          | back to channels-last; added to h via outer residual |
 | Inside DiT block: Q, K, V      | (B, 8, 256, 64)        | (heads, T, head_dim)               |
 | Inside DiT block: AdaLN params | 6 × (B, 1, 512)        | γ₁,β₁,α₁,γ₂,β₂,α₂                  |
 | After all 6 DiT blocks         | (B, 256, 512)          | hidden                             |
@@ -475,8 +523,9 @@ For a batch size B and sequence length T = `max_seq_len = 256`:
 - **EMA** — Exponential Moving Average of model weights. A smoothed version of the live model used for inference and validation; produces more stable, less noisy outputs than the live optimizer state.
 - **CFG** — Classifier-Free Guidance. Trains both a conditional and unconditional version of the model (via random conditioning dropout), then at inference interpolates between their predictions with a scale factor > 1 to amplify conditioning influence.
 - **Velocity field** — The function `v_θ(x_t, t, cond)` the model predicts. Integrating it from t=0 to t=1 gives the final mel.
-- **ConvNeXtV2** — A convolutional architecture using depthwise-separable convolutions with inverted bottleneck and Global Response Normalization (GRN). Used here as pre-processing blocks to capture local temporal patterns before the transformer.
+- **ConvNeXtV2** — A convolutional architecture using depthwise-separable convolutions with inverted bottleneck and Global Response Normalization (GRN). Used here as optional pre-processing blocks to capture local temporal patterns before the transformer.
 - **GRN** — Global Response Normalization. A normalization technique from ConvNeXtV2 that adds inter-channel competition by normalizing each channel relative to the L2 norm across the time dimension.
+- **WaveNet residual block** — A convolutional block from Parallel WaveGAN / DiffSinger using dilated non-causal convolutions with gated activations (tanh · sigmoid) and per-layer conditioning injection. Multiple blocks with cyclic dilations form a stack that provides exponentially growing receptive fields. Used here as an optional alternative to ConvNeXt pre-processing, with the key differences being: standard (non-depthwise) convolutions for full cross-channel mixing, binary gating for selective transient passing, and timestep conditioning at every layer.
 - **Blurred phoneme boundaries** — Instead of a hard per-frame phoneme embedding lookup, boundary frames get a weighted average of adjacent phoneme embeddings. The blend region scales with phoneme duration, mimicking natural coarticulation.
 - **Phoneme indirection** — On disk, `phoneme_mask` stores per-frame indices into a per-chunk `phoneme_ids` array. The actual token is `phoneme_ids[phoneme_mask[t]]`. The dataset resolves this before producing the model input.
 - **Prior mel** — The Vocaloid-rendered mel-spectrogram (`x_0`). The starting point of the OT path.

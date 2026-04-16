@@ -12,20 +12,23 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from configs.default import VocaloFlowConfig
 from model.dit_block import DiTBlock
 from model.convnext import ConvNeXtStack
+from model.wavenet import WaveNetStack
 from model.embeddings import TimestepMLP, PhonemeEmbedding, BlurredPhonemeEmbedding, F0Embedding
 
 
 class VocaloFlow(nn.Module):
     """Conditional flow matching model mapping Vocaloid mel -> high-quality mel.
 
-    Architecture (v3 — ConvNeXt pre-processing + blurred phoneme boundaries):
+    Architecture (v4 — optional ConvNeXt and/or WaveNet pre-processing):
       1. PhonemeEmbedding: (B, T) int IDs -> (B, T, 64) [optionally blurred]
       2. F0Embedding: (B, T) Hz -> (B, T, 64)
       3. Per-stream LayerNorm on x_t (128), prior_mel (128), f0_emb (64), ph_emb (64)
       4. Concatenate + vuv: (B, T, 385)
       5. Input projection: Linear(385, 512)
-      6. ConvNeXt pre-processing: 4x ConvNeXtV2 blocks (512 -> 512)
-      7. Timestep conditioning: sinusoidal -> MLP -> (B, 512)
+      6. Timestep conditioning: sinusoidal -> MLP -> (B, 512)
+      7a. ConvNeXt pre-processing (optional): Nx ConvNeXtV2 blocks (512 -> 512)
+      7b. WaveNet pre-processing (optional): Nx WaveNet residual blocks conditioned on t,
+          wrapped in an outer residual `h = h + wavenet_stack(h, c)`.
       8. DiT Block x6: Transformer with AdaLN-Zero, RoPE, GELU FFN, dropout
       9. Output projection: LayerNorm -> Linear(512, 128) -> velocity
 
@@ -76,6 +79,20 @@ class VocaloFlow(nn.Module):
             )
         else:
             self.convnext_stack = None
+
+        # WaveNet pre-processing blocks (timestep-conditioned, dilated+gated)
+        if config.num_wavenet_blocks > 0:
+            self.wavenet_stack = WaveNetStack(
+                hidden_channels=config.hidden_dim,
+                cond_channels=config.hidden_dim,
+                skip_channels=config.wavenet_skip_channels,
+                kernel_size=config.wavenet_kernel_size,
+                n_layers=config.num_wavenet_blocks,
+                dilation_cycle=config.wavenet_dilation_cycle,
+                dropout=config.wavenet_dropout,
+            )
+        else:
+            self.wavenet_stack = None
 
         # Timestep conditioning MLP
         self.timestep_mlp = TimestepMLP(hidden_dim=config.hidden_dim)
@@ -144,12 +161,17 @@ class VocaloFlow(nn.Module):
         # 5. Input projection: (B, T, 385) -> (B, T, 512)
         h = self.input_proj(cond)
 
-        # 6. ConvNeXt pre-processing (local temporal features)
+        # 6. Timestep conditioning: (B,) -> (B, 512)
+        # Computed before the pre-processors so the WaveNet stack can consume it.
+        c = self.timestep_mlp(t)
+
+        # 7a. ConvNeXt pre-processing (optional, no timestep conditioning)
         if self.convnext_stack is not None:
             h = self.convnext_stack(h)
 
-        # 7. Timestep conditioning: (B,) -> (B, 512)
-        c = self.timestep_mlp(t)
+        # 7b. WaveNet pre-processing (optional, timestep-conditioned, outer residual)
+        if self.wavenet_stack is not None:
+            h = h + self.wavenet_stack(h, c)
 
         # 8. DiT blocks
         for block in self.dit_blocks:

@@ -18,6 +18,7 @@ from configs.default import VocaloFlowConfig
 from model.vocaloflow import VocaloFlow
 from training.checkpoint import find_latest_checkpoint, load_checkpoint, save_checkpoint
 from training.flow_matching import FlowMatchingLoss
+from training.stft_loss import MultiResolutionSTFTLoss
 from training.lr_schedule import get_lr
 from utils.data_helpers import load_manifest, filter_manifest, split_by_song, split_random
 from utils.dataset import VocaloFlowDataset
@@ -118,9 +119,20 @@ def train(config: VocaloFlowConfig) -> None:
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay,
     )
+    stft_module = None
+    if config.stft_loss_enabled:
+        stft_module = MultiResolutionSTFTLoss(
+            resolutions=tuple(tuple(r) for r in config.stft_resolutions),
+        ).to(device)
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] "
+              f"STFT aux loss enabled (lambda={config.stft_loss_lambda}, "
+              f"resolutions={config.stft_resolutions})")
+
     criterion = FlowMatchingLoss(
         sigma_min=config.sigma_min,
         cfg_dropout_prob=config.cfg_dropout_prob,
+        stft_loss=stft_module,
+        stft_lambda=config.stft_loss_lambda if config.stft_loss_enabled else 0.0,
     )
 
     # ── Restore state if resuming ─────────────────────────────────────────
@@ -156,7 +168,8 @@ def train(config: VocaloFlowConfig) -> None:
                 pg["lr"] = lr
 
             # Forward + backward
-            loss = criterion(model, x_0, x_1, f0, voicing, phoneme_ids, padding_mask)
+            losses = criterion(model, x_0, x_1, f0, voicing, phoneme_ids, padding_mask)
+            loss = losses["total"]
 
             optimizer.zero_grad()
             loss.backward()
@@ -176,22 +189,44 @@ def train(config: VocaloFlowConfig) -> None:
 
             # Logging
             if global_step % config.log_every == 0:
-                writer.add_scalar("train/loss", loss.item(), global_step)
+                loss_val = loss.item()
+                velocity_val = losses["velocity"].item()
+                stft_val = losses["stft"].item()
+                writer.add_scalar("train/loss", loss_val, global_step)
+                writer.add_scalar("train/loss_velocity", velocity_val, global_step)
+                writer.add_scalar("train/loss_stft", stft_val, global_step)
                 writer.add_scalar("train/lr", lr, global_step)
                 wandb.log(
-                    {"train/loss": loss.item(), "train/lr": lr},
+                    {
+                        "train/loss": loss_val,
+                        "train/loss_velocity": velocity_val,
+                        "train/loss_stft": stft_val,
+                        "train/lr": lr,
+                    },
                     step=global_step,
                 )
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] "
-                      f"step={global_step}  loss={loss.item():.4f}  lr={lr:.2e}")
+                      f"step={global_step}  loss={loss_val:.4f}  "
+                      f"vel={velocity_val:.4f}  stft={stft_val:.4f}  lr={lr:.2e}")
 
             # Validation
             if global_step > 0 and global_step % config.val_every == 0:
-                val_loss = validate(ema_model, val_loader, criterion, device)
-                writer.add_scalar("val/loss", val_loss, global_step)
-                wandb.log({"val/loss": val_loss}, step=global_step)
+                val_losses = validate(ema_model, val_loader, criterion, device)
+                writer.add_scalar("val/loss", val_losses["total"], global_step)
+                writer.add_scalar("val/loss_velocity", val_losses["velocity"], global_step)
+                writer.add_scalar("val/loss_stft", val_losses["stft"], global_step)
+                wandb.log(
+                    {
+                        "val/loss": val_losses["total"],
+                        "val/loss_velocity": val_losses["velocity"],
+                        "val/loss_stft": val_losses["stft"],
+                    },
+                    step=global_step,
+                )
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] "
-                      f"step={global_step}  val_loss={val_loss:.4f}")
+                      f"step={global_step}  val_loss={val_losses['total']:.4f}  "
+                      f"val_vel={val_losses['velocity']:.4f}  "
+                      f"val_stft={val_losses['stft']:.4f}")
                 model.train()
 
             # Checkpoint
@@ -213,13 +248,13 @@ def validate(
     val_loader: DataLoader,
     criterion: FlowMatchingLoss,
     device: torch.device,
-) -> float:
-    """Run validation and return average loss."""
+) -> dict[str, float]:
+    """Run validation and return average loss components {total, velocity, stft}."""
     model.eval()
     # Disable CFG dropout during validation — criterion is an nn.Module
     # whose .training flag is independent of model.training.
     criterion.eval()
-    total_loss = 0.0
+    sums = {"total": 0.0, "velocity": 0.0, "stft": 0.0}
     n_batches = 0
 
     try:
@@ -231,13 +266,15 @@ def validate(
             phoneme_ids = batch["phoneme_ids"].to(device)
             padding_mask = batch["padding_mask"].to(device)
 
-            loss = criterion(model, x_0, x_1, f0, voicing, phoneme_ids, padding_mask)
-            total_loss += loss.item()
+            losses = criterion(model, x_0, x_1, f0, voicing, phoneme_ids, padding_mask)
+            for k in sums:
+                sums[k] += losses[k].item()
             n_batches += 1
     finally:
         criterion.train()
 
-    return total_loss / max(1, n_batches)
+    n = max(1, n_batches)
+    return {k: v / n for k, v in sums.items()}
 
 
 def _load_config_from_checkpoint(run_name: str) -> VocaloFlowConfig:
