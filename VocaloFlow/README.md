@@ -119,15 +119,18 @@ From the `VocaloFlow/` directory:
 Test script:
 python -m inference.pipeline 
     --ustx "../demo/let_it_go/let_it_go.ustx" 
-    --checkpoint "checkpoints/4-16-wavenet/checkpoint_55000.pt" 
-    --output "../demo/let_it_go/4-16-wavenet/output.wav"
+     --checkpoint ../AdversarialFinetune/checkpoints/4-17-adv/checkpoint_65000.pt
+    --output "../demo/let_it_go/4-17-adv/output.wav"
     --save-mels
+    --num-ode-steps 4
 
 python -m inference.pipeline 
     --ustx "../demo/we_are_charlie/we_are_charlie.ustx" 
     --checkpoint "checkpoints/4-16-wavenet/checkpoint_55000.pt" 
     --output "../demo/we_are_charlie/4-16-wavenet/output.wav"
     --save-mels
+
+
 
 
 ```bash

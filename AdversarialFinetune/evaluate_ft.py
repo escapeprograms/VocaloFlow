@@ -42,27 +42,28 @@ def _masked_l1(pred: Tensor, target: Tensor, padding_mask: Tensor | None) -> flo
     return val.item()
 
 
-def _save_mel_comparison_plot(
+def _build_mel_comparison_figure(
     prior_mel: Tensor,
     target_mel: Tensor,
     pred_32: Tensor,
     pred_4: Tensor,
     length: int,
-    save_path: str,
 ):
-    """Save a 4-panel mel comparison PNG.  Returns the matplotlib Figure.
+    """Return a 4-panel mel-comparison matplotlib Figure.
 
     Panels, left to right: prior | target | 32-step midpoint | 4-step Euler.
     All panels share the same colour range so visual differences reflect
     actual mel-value differences, not rescaling.  Each mel is truncated to
     ``length`` valid frames before plotting.
 
-    Inputs are 2D tensors ``(T, 128)`` on any device.
+    Inputs are 2D tensors ``(T, 128)`` on any device.  The caller owns the
+    returned Figure: it is responsible for saving (``fig.savefig``),
+    uploading to wandb (``wandb.Image(fig)``), and releasing
+    (``plt.close(fig)``).  This function performs no disk or network I/O.
     """
-    # Lazy import so the rest of this module stays usable on machines where
-    # matplotlib isn't installed (e.g. CPU-only smoke runs).
-    import matplotlib
-    matplotlib.use("Agg")
+    # Local import — cheap after the caller has already initialised
+    # matplotlib with the Agg backend, and keeps this module importable on
+    # machines without matplotlib when plotting is disabled.
     import matplotlib.pyplot as plt
 
     mels = [
@@ -86,9 +87,6 @@ def _save_mel_comparison_plot(
         ax.set_xlabel("frame")
     axes[0].set_ylabel("mel bin")
     fig.colorbar(im, ax=axes, shrink=0.9, pad=0.01)
-
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    fig.savefig(save_path, dpi=100)
     return fig
 
 
@@ -132,6 +130,22 @@ def evaluate_inference(
     plots_saved = 0
     wandb_images: dict = {}
 
+    # One-time plotting setup.  Import matplotlib / wandb only when needed,
+    # select the Agg backend before any pyplot use, and create the output
+    # directory once — inside the loop these would be repeated no-ops but
+    # noise.  If plotting is disabled, neither dependency is touched.
+    want_plots = (save_plots_dir is not None or log_plots_to_wandb) and num_plots > 0
+    plt = None
+    wandb = None
+    if want_plots:
+        import matplotlib as _mpl
+        _mpl.use("Agg")
+        import matplotlib.pyplot as plt  # noqa: F811
+        if save_plots_dir is not None:
+            os.makedirs(save_plots_dir, exist_ok=True)
+        if log_plots_to_wandb:
+            import wandb  # noqa: F811
+
     for batch in val_loader:
         if n >= num_samples:
             break
@@ -155,29 +169,25 @@ def evaluate_inference(
         sum_4 += _masked_l1(mel_4, x_1, padding_mask) * B
         n += B
 
-        # Save per-sample comparison plots on the first batch(es).
-        if (save_plots_dir is not None or log_plots_to_wandb) and plots_saved < num_plots:
+        if want_plots and plots_saved < num_plots:
             for i in range(B):
                 if plots_saved >= num_plots:
                     break
-                length = max(1, int(lengths[i]))
-                png_path = (
-                    os.path.join(save_plots_dir, f"sample_{plots_saved}.png")
-                    if save_plots_dir else os.devnull
+                fig = _build_mel_comparison_figure(
+                    x_0[i], x_1[i], mel_32[i], mel_4[i],
+                    length=max(1, int(lengths[i])),
                 )
-                fig = _save_mel_comparison_plot(
-                    x_0[i], x_1[i], mel_32[i], mel_4[i], length, png_path,
-                )
+                if save_plots_dir is not None:
+                    fig.savefig(
+                        os.path.join(save_plots_dir, f"sample_{plots_saved}.png"),
+                        dpi=100,
+                    )
                 if log_plots_to_wandb:
-                    import wandb
                     wandb_images[f"eval/mel_comparison_{plots_saved}"] = wandb.Image(fig)
-                # Free the figure to avoid the matplotlib memory leak warning.
-                import matplotlib.pyplot as plt
-                plt.close(fig)
+                plt.close(fig)                          # release matplotlib memory
                 plots_saved += 1
 
     if log_plots_to_wandb and wandb_images:
-        import wandb
         wandb.log(wandb_images, step=wandb_step)
 
     n = max(1, n)

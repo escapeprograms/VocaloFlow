@@ -5,6 +5,7 @@ with ``VocaloFlow/training/checkpoint.py`` if this module and VocaloFlow's
 ``training`` package ever end up on the same ``sys.path``.
 """
 
+import dataclasses
 import glob
 import os
 import re
@@ -49,14 +50,26 @@ def save_checkpoint(
 ) -> str:
     """Save an adversarial-fine-tune checkpoint and return the written path.
 
-    The checkpoint is cross-compatible with VocaloFlow's inference pipeline:
+    The checkpoint is cross-compatible with VocaloFlow's inference pipeline.
+    Two config keys are stored, on purpose, in different forms:
 
-    * ``config`` — the ``VocaloFlowConfig`` that matches the model's
-      architecture.  ``VocaloFlow/inference/pipeline.py::load_model`` reads
-      this key to instantiate the model, so passing our checkpoint path
-      straight to that pipeline works out-of-the-box.
-    * ``finetune_config`` — the ``FinetuneConfig`` used to drive fine-tuning.
-      Our own resume logic reads this key.
+    ``config`` — ``VocaloFlowConfig`` **instance** (not dict).
+        ``VocaloFlow/inference/pipeline.py::load_model`` reads this key as an
+        object, accessing ``.num_wavenet_blocks`` etc. directly to build the
+        model.  A dict would silently break that access.  Unpickling on
+        VocaloFlow's sys.path works because ``VocaloFlowConfig`` lives at
+        ``configs.default.VocaloFlowConfig``, which is importable from any
+        process that has ``VocaloFlow/`` on its path — the only expected
+        consumer of this key.  **Do not change to asdict().**
+
+    ``finetune_config`` — plain dict (via ``dataclasses.asdict``).
+        ``torch.load`` unpickles the whole checkpoint atomically, so every
+        stored object has to be reconstructible in the reader's process.
+        Storing as a dict removes the ``finetune_config`` module reference
+        that a pickled ``FinetuneConfig`` instance would carry — VocaloFlow's
+        inference pipeline doesn't have our module on its sys.path and would
+        otherwise crash.  Our own resume logic rebuilds the dataclass with
+        ``rebuild_dataclass_tolerant``.
 
     The ``ema_model_state_dict`` and ``model_state_dict`` keys match
     VocaloFlow's convention; its loader prefers EMA when present.
@@ -71,8 +84,10 @@ def save_checkpoint(
             "discriminator_state_dict": discriminator.state_dict(),
             "opt_g_state_dict": opt_g.state_dict(),
             "opt_d_state_dict": opt_d.state_dict(),
-            "config": vf_config,              # for VocaloFlow inference pipeline
-            "finetune_config": config,        # for our resume logic
+            # INSTANCE on purpose — VocaloFlow's load_model reads .attributes.  See docstring.
+            "config": vf_config,
+            # DICT on purpose — portable across sys.path contexts.  See docstring.
+            "finetune_config": dataclasses.asdict(config),
             "wandb_run_id": wandb_run_id,
         },
         path,
