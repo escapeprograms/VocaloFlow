@@ -1,0 +1,2 @@
+This uses the same architecture as 4-15-wavenet, but I fixed a bug where a mismatch length of prior/target mels were being resampled (scaled linearly).
+It now pads the shorter one.

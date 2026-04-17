@@ -1,0 +1,36 @@
+# AdversarialFinetune: full Experiment 2 run.
+# Starts from the latest 4-16-wavenet VocaloFlow checkpoint (step 55000)
+# and fine-tunes for 30,000 steps with CFM anchor + L1 reconstruction +
+# hinge-GAN + feature matching on 4-step Euler ODE outputs.
+
+pretrained_run: 4-16-wavenet
+pretrained_step: 0              # 0 = latest
+
+# All four loss components active.
+enable_cfm: true
+enable_reconstruction: true
+enable_adversarial: true
+enable_feature_matching: true
+
+lambda_cfm: 1.0
+lambda_rec: 1.0
+lambda_adv: 0.1
+lambda_fm: 2.0
+
+ode_num_steps: 4
+ode_method: euler
+ode_grad_checkpoint: false      # enable if OOM at batch_size=8
+
+disc_warmup_steps: 3000
+adv_ramp_steps: 2000
+
+gen_learning_rate: 2.0e-5
+disc_learning_rate: 2.0e-4
+reset_gen_optimizer: true       # drop pretrained Adam moments
+
+batch_size: 8
+total_finetune_steps: 30000
+log_every: 50
+val_every: 1000
+eval_every: 3000
+save_every: 5000

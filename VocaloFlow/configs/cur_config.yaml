@@ -1,7 +1,12 @@
 num_dit_blocks: 6
 num_convnext_blocks: 0
 
+num_wavenet_blocks: 8
+wavenet_kernel_size: 3
+wavenet_dilation_cycle: 4
+wavenet_skip_channels: 512
+wavenet_dropout: 0.10
+
 phoneme_blur_enabled: false
 phoneme_blend_fraction: 0.2
 
-stft_loss_enabled: true

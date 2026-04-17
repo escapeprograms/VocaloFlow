@@ -22,7 +22,7 @@ input_channels: 385
 dropout: 0.1
 phoneme_blur_enabled: false
 phoneme_blend_fraction: 0.2
-num_wavenet_blocks: 8
+num_wavenet_blocks: 8 #main change
 wavenet_kernel_size: 3
 wavenet_dilation_cycle: 4
 wavenet_skip_channels: 512

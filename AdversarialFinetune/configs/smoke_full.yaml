@@ -1,0 +1,32 @@
+# Smoke test: full pipeline (CFM + rec + adv + fm) for 500 steps.
+# Does NOT reach the adversarial phase (disc_warmup_steps=3000 by default),
+# so expect lambda_adv == lambda_fm == 0 throughout — this just verifies
+# the disc update path runs without crashing while the G loss stays on
+# CFM+reconstruction only.
+
+pretrained_run: 4-16-wavenet
+pretrained_step: 0
+
+enable_cfm: true
+enable_reconstruction: true
+enable_adversarial: true
+enable_feature_matching: true
+
+lambda_cfm: 1.0
+lambda_rec: 1.0
+lambda_adv: 0.1
+lambda_fm: 2.0
+
+# Shorten the warmup so the ramp actually kicks in during the smoke run.
+disc_warmup_steps: 100
+adv_ramp_steps: 100
+
+ode_num_steps: 4
+ode_method: euler
+
+batch_size: 4                   # smaller for ODE + discriminator memory budget
+total_finetune_steps: 500
+log_every: 25
+val_every: 250
+eval_every: 500
+save_every: 500

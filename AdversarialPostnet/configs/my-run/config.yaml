@@ -1,0 +1,48 @@
+data_dir: ../Data/Rachie
+manifest_path: ../Data/Rachie/manifest.csv
+vocaloflow_checkpoint: ../VocaloFlow/checkpoints/4-16-wavenet/checkpoint_55000.pt
+max_dtw_cost: 100.0
+max_songs: 0
+song_subset_seed: 42
+predicted_mel_manifest: predicted_mel_manifest.csv
+max_seq_len: 256
+val_fraction: 0.05
+seed: 42
+split_mode: song
+num_ode_steps: 32
+ode_method: midpoint
+cfg_scale: 2.0
+generation_batch_size: 16
+batch_size: 32
+postnet_num_blocks: 4
+postnet_kernel_size: 3
+disc_channels:
+- 32
+- 64
+- 128
+- 256
+lambda_adv: 0.1
+lambda_fm: 2.0
+learning_rate: 0.0002
+disc_learning_rate: 0.0002
+adam_beta1: 0.8
+adam_beta2: 0.99
+weight_decay: 0.01
+grad_clip: 1.0
+total_steps: 20000
+warmup_steps: 0
+disc_warmup_steps: 2000
+adv_ramp_steps: 1000
+log_every: 50
+val_every: 1000
+save_every: 5000
+crop_specs:
+- - 32
+  - 64
+- - 64
+  - 128
+- - 128
+  - 128
+run_name: my-run
+checkpoint_dir: ./checkpoints\my-run
+log_dir: ./logs\my-run

@@ -28,11 +28,7 @@ PyTorch Dataset that handles three data challenges:
 
 1. **Phoneme indirection**: `phoneme_mask.npy` contains indices into `phoneme_ids.npy`. Resolved at load time: `resolved = phoneme_ids[clip(phoneme_mask, 0, len-1)]`.
 
-2. **T-mismatch**: prior_mel, target_mel, f0, voicing, and phoneme_mask can all have different time dimensions. All are resampled to `target_mel`'s T:
-   - `prior_mel`: linear interpolation (continuous values)
-   - `phoneme_ids`: nearest-neighbor interpolation (discrete values)
-   - `f0`: linear interpolation
-   - `voicing`: nearest-neighbor interpolation
+2. **T-mismatch**: prior_mel, target_mel, f0, voicing, and phoneme_mask can have slightly different time dimensions (off by a few frames after DTW alignment). All are padded or truncated to `target_mel`'s T — no interpolation, since DTW already aligned them temporally.
 
 3. **Variable lengths**: Random crop (training) or start crop (eval) to `max_seq_len`. Shorter sequences are zero-padded. A `padding_mask` (bool, True=valid) is returned.
 

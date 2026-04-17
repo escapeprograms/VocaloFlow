@@ -1,0 +1,20 @@
+# Smoke test: CFM anchor loss only (no reconstruction, no adversarial).
+# Should behave like resumed VocaloFlow training at 2e-5 LR.
+# Use --total-finetune-steps 200 on the CLI for a fast sanity run.
+
+pretrained_run: 4-16-wavenet
+pretrained_step: 0
+
+enable_cfm: true
+enable_reconstruction: false
+enable_adversarial: false
+enable_feature_matching: false
+
+lambda_cfm: 1.0
+
+batch_size: 8
+total_finetune_steps: 200
+log_every: 10
+val_every: 100
+eval_every: 200
+save_every: 200

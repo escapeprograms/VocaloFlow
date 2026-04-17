@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 
-from utils.resample import resample_1d, resample_2d, resolve_phoneme_indirection
+from utils.resample import resolve_phoneme_indirection
 
 
 class VocaloFlowDataset(Dataset):
@@ -16,7 +16,8 @@ class VocaloFlowDataset(Dataset):
 
     Handles three key data challenges:
       1. T-mismatch: prior_mel, target_mel, and phoneme_mask may have
-         different time dimensions. All are resampled to target_mel's T.
+         slightly different time dimensions (off by a few frames after
+         DTW alignment). All are padded or truncated to target_mel's T.
       2. phoneme_mask indirection: phoneme_mask[t] is an index into
          phoneme_ids, not a direct token ID. Resolved during loading.
       3. Variable lengths: Sequences are randomly cropped or zero-padded
@@ -73,11 +74,21 @@ class VocaloFlowDataset(Dataset):
 
         T_target = target_mel.shape[0]
 
-        # ── Resample all signals to T_target ─────────────────────────────
-        prior_mel = resample_2d(prior_mel, T_target, mode="linear")
-        resolved_phonemes = resample_1d(resolved_phonemes, T_target, mode="nearest")
-        f0 = resample_1d(f0, T_target, mode="linear")
-        voicing = resample_1d(voicing, T_target, mode="nearest")
+        # ── Pad/truncate signals to T_target (already DTW-aligned) ───────
+        def _match_len_1d(x, target_len):
+            if x.shape[0] >= target_len:
+                return x[:target_len]
+            return F.pad(x, (0, target_len - x.shape[0]))
+
+        def _match_len_2d(x, target_len):
+            if x.shape[0] >= target_len:
+                return x[:target_len]
+            return F.pad(x, (0, 0, 0, target_len - x.shape[0]))
+
+        prior_mel = _match_len_2d(prior_mel, T_target)
+        resolved_phonemes = _match_len_1d(resolved_phonemes, T_target)
+        f0 = _match_len_1d(f0, T_target)
+        voicing = _match_len_1d(voicing, T_target)
 
         # ── Crop or pad to max_seq_len ────────────────────────────────────
         length = min(T_target, self.max_seq_len)
