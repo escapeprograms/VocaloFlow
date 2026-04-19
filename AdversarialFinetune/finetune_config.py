@@ -41,6 +41,7 @@ class FinetuneConfig:
     lambda_rec: float = 1.0
     lambda_adv: float = 0.1
     lambda_fm: float = 2.0
+    lambda_cfm_final: float = 1.0                # end-of-training value (1.0 = no decay)
 
     # -- CFG (applies only to the CFM phase; ODE phase always uses full cond)
     cfg_dropout_prob: float = 0.2
@@ -76,10 +77,31 @@ class FinetuneConfig:
     num_mel_plots: int = 4                        # cap on PNGs saved (and uploaded to wandb) per eval
 
     # -- Discriminator ---------------------------------------------------
+    disc_type: str = "patch"                          # "patch" (PatchDiscriminator) or "dit" (DiTDiscriminator)
     disc_channels: list = field(default_factory=lambda: [32, 64, 128, 256])
     crop_specs: list = field(default_factory=lambda: [
         [32, 64], [64, 128], [128, 128],
     ])
+    disc_dit_num_blocks: int = 4
+    disc_dit_hidden_dim: int = 512
+    disc_dit_num_heads: int = 8
+    disc_dit_ffn_dim: int = 2048
+    disc_dit_feature_blocks: list = field(default_factory=lambda: [1, 3])
+    disc_steps_per_gen: int = 1                       # D updates per G update (>1 uses fresh batches)
+    logit_center_weight: float = 0.0                  # 0 = disabled; e.g. 0.01 to penalize logit drift
+
+    # -- Gradient normalization (Exp 4) ---------------------------------
+    enable_grad_norm: bool = False                    # separate adv backward + L2-normalize
+
+    # -- Discriminator augmentation (Exp 4) -----------------------------
+    enable_disc_augmentation: bool = False
+    disc_aug_prob: float = 0.5                        # per-augmentation fire probability
+    disc_aug_max_shift: int = 16                      # circular temporal shift range (frames)
+    disc_aug_cutout_min: int = 8                      # temporal cutout minimum width (frames)
+    disc_aug_cutout_max: int = 32                     # temporal cutout maximum width (frames)
+    enable_freq_cutout: bool = False                  # optional frequency-band cutout
+    disc_aug_freq_cutout_min: int = 8
+    disc_aug_freq_cutout_max: int = 32
 
     # -- Paths ------------------------------------------------------------
     run_name: str = ""

@@ -86,6 +86,8 @@ from ft_checkpoint import (                           # noqa: E402
 )
 from ode_unroll import unroll_ode                     # noqa: E402
 from evaluate_ft import evaluate_inference, validate_recon_4step  # noqa: E402
+from dit_discriminator import DiTDiscriminator         # noqa: E402
+from disc_augmentation import augment_mel             # noqa: E402
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -133,6 +135,14 @@ def get_effective_lambda(ft_step: int, config: FinetuneConfig, base_lambda: floa
         return 0.0
     progress = (ft_step - config.disc_warmup_steps) / max(1, config.adv_ramp_steps)
     return base_lambda * min(1.0, progress)
+
+
+def get_lambda_cfm(ft_step: int, config: FinetuneConfig) -> float:
+    """Linearly decay lambda_cfm from ``lambda_cfm`` to ``lambda_cfm_final``."""
+    if config.lambda_cfm == config.lambda_cfm_final:
+        return config.lambda_cfm
+    progress = min(1.0, ft_step / max(1, config.total_finetune_steps))
+    return config.lambda_cfm + (config.lambda_cfm_final - config.lambda_cfm) * progress
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -373,6 +383,130 @@ def _generator_adv_losses(
     return g_adv, l_fm
 
 
+# ── DiT discriminator path (full-sequence, no crops) ──────────────────────
+
+def _dit_discriminator_step(
+    x_1: torch.Tensor,
+    x_1_hat: torch.Tensor,
+    padding_mask: torch.Tensor,
+    discriminator: torch.nn.Module,
+    opt_d: torch.optim.Optimizer,
+    config: FinetuneConfig,
+    device: torch.device,
+    ft_step: int = 0,
+) -> tuple[float, float, float]:
+    """One discriminator optimizer step on full mel sequences.
+
+    Returns ``(d_loss_val, d_real_mean, d_fake_mean)`` for logging.
+    """
+    x_1_d = x_1
+    x_1_hat_d = x_1_hat.detach()
+    if config.enable_disc_augmentation:
+        rng = torch.Generator(device="cpu")
+        rng.manual_seed(ft_step * 2)
+        x_1_d = augment_mel(x_1, config, rng)
+        rng.manual_seed(ft_step * 2)
+        x_1_hat_d = augment_mel(x_1_hat.detach(), config, rng)
+
+    real_scores, _ = discriminator(x_1_d, padding_mask)
+    fake_scores, _ = discriminator(x_1_hat_d, padding_mask)
+    d_loss = hinge_d_loss(real_scores, fake_scores)
+
+    if config.logit_center_weight > 0:
+        d_loss = d_loss + config.logit_center_weight * real_scores.mean() ** 2
+
+    d_real_mean = real_scores.mean().item()
+    d_fake_mean = fake_scores.mean().item()
+
+    opt_d.zero_grad()
+    d_loss.backward()
+    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), config.grad_clip)
+    opt_d.step()
+    return d_loss.item(), d_real_mean, d_fake_mean
+
+
+def _dit_generator_adv_losses(
+    x_1: torch.Tensor,
+    x_1_hat: torch.Tensor,
+    padding_mask: torch.Tensor,
+    discriminator: torch.nn.Module,
+    config: FinetuneConfig,
+    eff_lambda_fm: float,
+    device: torch.device,
+    ft_step: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Adversarial + feature-matching losses on full mel sequences."""
+    x_1_g = x_1
+    x_1_hat_g = x_1_hat
+    if config.enable_disc_augmentation:
+        rng = torch.Generator(device="cpu")
+        rng.manual_seed(ft_step * 2 + 1)
+        x_1_g = augment_mel(x_1, config, rng)
+        rng.manual_seed(ft_step * 2 + 1)
+        x_1_hat_g = augment_mel(x_1_hat, config, rng)
+
+    fake_scores, fake_feats = discriminator(x_1_hat_g, padding_mask)
+    g_adv = hinge_g_loss(fake_scores)
+    l_fm = torch.zeros((), device=device)
+    if config.enable_feature_matching and eff_lambda_fm > 0:
+        _, real_feats = discriminator(x_1_g, padding_mask)
+        l_fm = feature_matching_loss(real_feats, fake_feats)
+    return g_adv, l_fm
+
+
+def _extra_d_steps(
+    d_batch_iter,
+    train_loader: DataLoader,
+    model: torch.nn.Module,
+    discriminator: torch.nn.Module,
+    opt_d: torch.optim.Optimizer,
+    config: FinetuneConfig,
+    ft_step: int,
+    crop_specs: list,
+    device: torch.device,
+):
+    """Run additional discriminator steps with fresh batches (no generator gradient)."""
+    eff_lambda_adv = get_effective_lambda(
+        ft_step, config, config.lambda_adv,
+    ) if config.enable_adversarial else 0.0
+    if eff_lambda_adv <= 0:
+        return d_batch_iter
+
+    for extra_idx in range(config.disc_steps_per_gen - 1):
+        try:
+            batch = next(d_batch_iter)
+        except StopIteration:
+            d_batch_iter = iter(train_loader)
+            batch = next(d_batch_iter)
+
+        x_0, x_1, f0, voicing, phoneme_ids, padding_mask = unpack_batch(batch, device)
+
+        with torch.no_grad():
+            x_1_hat = unroll_ode(
+                model, x_0, f0, voicing, phoneme_ids, padding_mask,
+                num_steps=config.ode_num_steps,
+                method=config.ode_method,
+                grad_checkpoint=False,
+            )
+
+        if config.disc_type == "dit":
+            _dit_discriminator_step(
+                x_1, x_1_hat, padding_mask,
+                discriminator, opt_d, config, device,
+                ft_step=ft_step + 1_000_000 * (extra_idx + 1),
+            )
+        else:
+            crop_pairs = extract_random_crops(
+                x_1, x_1_hat, crop_specs, padding_mask,
+            )
+            if crop_pairs:
+                _discriminator_step(
+                    crop_pairs, discriminator, opt_d, config, device,
+                )
+
+    return d_batch_iter
+
+
 def _training_step(
     batch: dict,
     model: torch.nn.Module,
@@ -434,22 +568,33 @@ def _training_step(
     else:
         x_1_hat = None
 
-    # === Random crops (shared across D and G updates) ========
-    if x_1_hat is not None:
-        crop_pairs = extract_random_crops(
-            x_1, x_1_hat, crop_specs, padding_mask,
-        )
-    else:
-        crop_pairs = []
-
     # === Discriminator update =================================
     d_loss_val = 0.0
     d_real_mean = 0.0
     d_fake_mean = 0.0
-    if config.enable_adversarial and crop_pairs:
-        d_loss_val, d_real_mean, d_fake_mean = _discriminator_step(
-            crop_pairs, discriminator, opt_d, config, device,
-        )
+
+    use_dit = config.disc_type == "dit"
+
+    if use_dit:
+        # DiT discriminator: full-sequence path (no crops)
+        if config.enable_adversarial and x_1_hat is not None:
+            d_loss_val, d_real_mean, d_fake_mean = _dit_discriminator_step(
+                x_1, x_1_hat, padding_mask,
+                discriminator, opt_d, config, device,
+                ft_step=ft_step,
+            )
+    else:
+        # Patch discriminator: crop-based path
+        if x_1_hat is not None:
+            crop_pairs = extract_random_crops(
+                x_1, x_1_hat, crop_specs, padding_mask,
+            )
+        else:
+            crop_pairs = []
+        if config.enable_adversarial and crop_pairs:
+            d_loss_val, d_real_mean, d_fake_mean = _discriminator_step(
+                crop_pairs, discriminator, opt_d, config, device,
+            )
 
     # === Generator losses ====================================
     l_rec = torch.zeros((), device=device)
@@ -459,25 +604,78 @@ def _training_step(
     if config.enable_reconstruction and x_1_hat is not None:
         l_rec = masked_l1(x_1_hat, x_1, padding_mask)
 
-    if config.enable_adversarial and crop_pairs and eff_lambda_adv > 0:
-        g_adv, l_fm = _generator_adv_losses(
-            crop_pairs, discriminator, config, eff_lambda_fm, device,
-        )
+    if config.enable_adversarial and x_1_hat is not None and eff_lambda_adv > 0:
+        if use_dit:
+            g_adv, l_fm = _dit_generator_adv_losses(
+                x_1, x_1_hat, padding_mask,
+                discriminator, config, eff_lambda_fm, device,
+                ft_step=ft_step,
+            )
+        else:
+            if crop_pairs:
+                g_adv, l_fm = _generator_adv_losses(
+                    crop_pairs, discriminator, config, eff_lambda_fm, device,
+                )
 
-    total_g = (
-        config.lambda_cfm * l_cfm
-        + config.lambda_rec * l_rec
-        + eff_lambda_adv * g_adv
-        + eff_lambda_fm * l_fm
+    current_lambda_cfm = get_lambda_cfm(ft_step, config)
+    adv_grad_norm = 0.0
+    cfm_grad_norm = 0.0
+
+    use_grad_norm = (
+        config.enable_grad_norm
+        and config.enable_adversarial
+        and eff_lambda_adv > 0
     )
 
-    opt_g.zero_grad()
-    total_g.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-    opt_g.step()
+    if use_grad_norm:
+        # === Gradient normalization path ===
+        non_adv_loss = current_lambda_cfm * l_cfm + config.lambda_rec * l_rec
+        opt_g.zero_grad()
+        non_adv_loss.backward(retain_graph=True)
+
+        cfm_grad_norm = torch.nn.utils.clip_grad_norm_(
+            model.parameters(), float("inf"),
+        ).item()
+
+        adv_loss = eff_lambda_adv * g_adv + eff_lambda_fm * l_fm
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        adv_grads = torch.autograd.grad(
+            adv_loss, trainable_params,
+            retain_graph=False, allow_unused=True,
+        )
+        adv_grad_tensors = [
+            g if g is not None else torch.zeros_like(p)
+            for g, p in zip(adv_grads, trainable_params)
+        ]
+        adv_grad_norm = sum(
+            (g ** 2).sum() for g in adv_grad_tensors
+        ).sqrt().item()
+
+        if adv_grad_norm > 1e-8:
+            scale = 1.0 / adv_grad_norm
+            for p, ag in zip(trainable_params, adv_grad_tensors):
+                if p.grad is not None:
+                    p.grad.add_(ag, alpha=scale)
+
+        torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+        opt_g.step()
+        total_g_val = non_adv_loss.item() + adv_loss.item()
+    else:
+        # === Original single-backward path ===
+        total_g = (
+            current_lambda_cfm * l_cfm
+            + config.lambda_rec * l_rec
+            + eff_lambda_adv * g_adv
+            + eff_lambda_fm * l_fm
+        )
+        opt_g.zero_grad()
+        total_g.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+        opt_g.step()
+        total_g_val = total_g.item()
 
     return {
-        "train/loss_total_g": total_g.item(),
+        "train/loss_total_g": total_g_val,
         "train/loss_cfm": l_cfm.item(),
         "train/loss_rec": l_rec.item(),
         "train/loss_g_adv": g_adv.item(),
@@ -485,6 +683,9 @@ def _training_step(
         "train/loss_d": d_loss_val,
         "train/lambda_adv": eff_lambda_adv,
         "train/lambda_fm": eff_lambda_fm,
+        "train/lambda_cfm": current_lambda_cfm,
+        "train/adv_grad_norm": adv_grad_norm,
+        "train/cfm_grad_norm": cfm_grad_norm,
         "train/lr_g": lr_g,
         "train/lr_d": lr_d,
         "train/d_real_mean": d_real_mean,
@@ -539,7 +740,10 @@ def _log_train_metrics(
         f"d={metrics['train/loss_d']:.4f} "
         f"D(r)={metrics['train/d_real_mean']:.3f} "
         f"D(f)={metrics['train/d_fake_mean']:.3f} "
-        f"λa={metrics['train/lambda_adv']:.4f}"
+        f"λa={metrics['train/lambda_adv']:.4f} "
+        f"λcfm={metrics.get('train/lambda_cfm', 0):.3f} "
+        f"adv_gn={metrics.get('train/adv_grad_norm', 0):.2e} "
+        f"cfm_gn={metrics.get('train/cfm_grad_norm', 0):.2e}"
     )
 
 
@@ -640,9 +844,20 @@ def train(config: FinetuneConfig) -> None:
 
     train_loader, val_loader = _build_dataloaders(config)
 
-    discriminator = PatchDiscriminator(channels=list(config.disc_channels)).to(device)
+    if config.disc_type == "dit":
+        discriminator = DiTDiscriminator(
+            mel_dim=vf_config.mel_channels,
+            hidden_dim=config.disc_dit_hidden_dim,
+            num_blocks=config.disc_dit_num_blocks,
+            num_heads=config.disc_dit_num_heads,
+            ffn_dim=config.disc_dit_ffn_dim,
+            max_len=vf_config.max_seq_len + 1,
+            feature_block_indices=list(config.disc_dit_feature_blocks),
+        ).to(device)
+    else:
+        discriminator = PatchDiscriminator(channels=list(config.disc_channels)).to(device)
     disc_params = sum(p.numel() for p in discriminator.parameters())
-    print(f"[{timestamp()}] Discriminator parameters: {disc_params:,}")
+    print(f"[{timestamp()}] Discriminator ({config.disc_type}): {disc_params:,} params")
 
     opt_g, opt_d = _build_optimizers(config, model, discriminator)
 
@@ -672,6 +887,9 @@ def train(config: FinetuneConfig) -> None:
     model.train()
     discriminator.train()
 
+    # Separate iterator for extra discriminator steps (fresh batches)
+    d_batch_iter = iter(train_loader) if config.disc_steps_per_gen > 1 else None
+
     while global_step < end_global_step:
         for batch in train_loader:
             if global_step >= end_global_step:
@@ -683,6 +901,14 @@ def train(config: FinetuneConfig) -> None:
                 batch, model, discriminator, opt_g, opt_d,
                 criterion, crop_specs, config, ft_step, device,
             )
+
+            if d_batch_iter is not None and config.disc_steps_per_gen > 1:
+                d_batch_iter = _extra_d_steps(
+                    d_batch_iter, train_loader,
+                    model, discriminator, opt_d,
+                    config, ft_step, crop_specs, device,
+                )
+
             _ema_update(ema_model, model, global_step, config)
 
             if global_step % config.log_every == 0:

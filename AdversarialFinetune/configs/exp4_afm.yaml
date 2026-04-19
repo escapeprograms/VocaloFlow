@@ -1,0 +1,52 @@
+# Experiment 4: Matching the Adversarial Flow Models training recipe.
+# DiT discriminator, gradient normalization, lambda_cfm decay, disc augmentation.
+
+pretrained_run: 4-16-wavenet
+pretrained_step: 0
+
+enable_cfm: true
+enable_reconstruction: false
+enable_adversarial: true
+enable_feature_matching: false
+
+lambda_cfm: 1.0
+lambda_cfm_final: 0.2
+lambda_rec: 0.0
+lambda_adv: 1.0
+lambda_fm: 0.0
+
+enable_grad_norm: true
+
+enable_disc_augmentation: true
+disc_aug_prob: 0.5
+disc_aug_max_shift: 16
+disc_aug_cutout_min: 8
+disc_aug_cutout_max: 32
+enable_freq_cutout: false
+
+ode_num_steps: 4
+ode_method: euler
+ode_grad_checkpoint: false
+
+disc_warmup_steps: 500
+adv_ramp_steps: 3000
+
+gen_learning_rate: 2.0e-5
+disc_learning_rate: 2.0e-4
+reset_gen_optimizer: true
+
+batch_size: 8
+total_finetune_steps: 30000
+log_every: 50
+val_every: 1000
+eval_every: 3000
+save_every: 5000
+
+disc_type: dit
+disc_dit_num_blocks: 4
+disc_dit_hidden_dim: 512
+disc_dit_num_heads: 8
+disc_dit_ffn_dim: 2048
+disc_dit_feature_blocks: [1, 3]
+disc_steps_per_gen: 1
+logit_center_weight: 0.01

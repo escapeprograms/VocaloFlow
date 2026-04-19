@@ -61,6 +61,8 @@ AdversarialFinetune/
 ├── cfm_loss.py                   # wrapper around VocaloFlow's FlowMatchingLoss
 ├── evaluate_ft.py                # periodic 32-step vs 4-step inference eval
 ├── train_finetune.py             # main training entry point
+├── dit_discriminator.py          # DiT transformer-based discriminator
+├── disc_augmentation.py          # discriminator input augmentation (Exp 4)
 ├── ft_utils/                     # reusable helpers (unique name — no collision)
 │   ├── imports.py                # import_from_path + sys.path bootstrap for VocaloFlow
 │   ├── batch.py                  # BatchTensors, unpack_batch, timestamp()
@@ -69,7 +71,8 @@ AdversarialFinetune/
 │   ├── exp2_v1.yaml              # full 30k-step run
 │   ├── smoke_cfm_only.yaml       # CFM only, 200 steps
 │   ├── smoke_cfm_rec.yaml        # CFM + L1, 500 steps
-│   └── smoke_full.yaml           # all losses, 500 steps (no adv phase reached)
+│   ├── smoke_full.yaml           # all losses, 500 steps (no adv phase reached)
+│   └── exp4_afm.yaml             # Exp 4: AFM recipe (grad norm + decay + augmentation)
 ├── checkpoints/                  # created at run time: checkpoints/<run_name>/
 └── logs/                         # created at run time: logs/<run_name>/
 ```
@@ -239,6 +242,36 @@ Two entry points:
 Mel-only by design.  Vocoding, F0 RMSE, and Whisper-WER live in a separate
 post-run script (not yet written) to keep training fast.
 
+### `dit_discriminator.py`
+
+Transformer-based discriminator for full-sequence mel classification.
+`DiTDiscriminator(mel_dim=128, hidden_dim=512, num_blocks=4, num_heads=8,
+ffn_dim=2048, max_len=512, feature_block_indices=[1,3])` — ~12.75M params.
+
+Architecture: input projection → prepend learnable [CLS] token →
+N `TransformerBlock` layers (pre-norm, RoPE, GELU FFN) → LayerNorm on
+[CLS] position → Linear(hidden_dim, 1) scalar logit.
+
+`forward(mel, padding_mask)` returns `(logits, features)` where
+`logits` is (B, 1) and `features` is a list of intermediate block outputs
+at `feature_block_indices` for feature matching.
+
+### `disc_augmentation.py`
+
+Discriminator input augmentation module (Exp 4).  All ops are
+differentiable so gradients flow through during the G update.
+
+* `temporal_shift(mel, shift)` — circular `torch.roll` along time dim.
+* `temporal_cutout(mel, start, width)` — zero a contiguous frame block.
+* `frequency_cutout(mel, start, width)` — zero a contiguous freq-bin block.
+* `augment_mel(mel, config, rng)` — entry point.  Each augmentation fires
+  independently with probability `config.disc_aug_prob`.  Uses a
+  `torch.Generator` seeded by the caller so real and fake mels receive
+  identical augmentation parameters.
+
+Includes `__main__` smoke test: determinism, shape, cutout verification,
+gradient flow.
+
 ### `train_finetune.py`
 
 Main entry point.  `train()` is a thin control loop that delegates to
@@ -267,9 +300,15 @@ inline any more.  High-level flow:
 6. **Per-step loop** (`while global_step < end_global_step: for batch in …`):
    * `_training_step(...)` — one full forward + D update + G update step.
      Internally: `unpack_batch`, LR update, CFM phase, ODE unroll,
-     `extract_random_crops`, `_discriminator_step(...)` when
-     `enable_adversarial`, then L_rec + `_generator_adv_losses(...)`,
-     weighted sum, `opt_g.step()`.  Returns a dict of scalars.
+     discriminator step (with optional augmentation via `augment_mel`),
+     then generator losses.  Two G-update paths: (a) **gradient
+     normalization** (`enable_grad_norm=True`): separate backward for
+     CFM/rec, `torch.autograd.grad` for adversarial, L2-normalize
+     adversarial grads to unit norm, add to CFM grads, clip, step;
+     (b) **single backward** (default): weighted sum of all losses,
+     `backward()`, clip, step.  Lambda_cfm is computed via
+     `get_lambda_cfm()` which supports linear decay.  Returns a dict
+     of scalars including `adv_grad_norm` and `cfm_grad_norm`.
    * `_ema_update(ema_model, model, global_step, config)` — warmup-safe
      `min(ema_decay, (step+1)/(step+10))` formula.
    * `_log_train_metrics(...)` every `log_every` steps (TB + wandb + console).
@@ -341,6 +380,26 @@ individual losses in isolation.
 | `lambda_rec` | `1.0` | Multiplier on L1 reconstruction. |
 | `lambda_adv` | `0.1` | Target multiplier on adversarial loss (ramps from 0 after warmup). |
 | `lambda_fm` | `2.0` | Target multiplier on feature matching (ramps on the same schedule as `lambda_adv`). |
+| `lambda_cfm_final` | `1.0` | End-of-training value for `lambda_cfm`.  When equal to `lambda_cfm` (default), no decay.  Set to e.g. `0.2` for linear decay over the full run. |
+
+### Gradient normalization (Exp 4)
+
+| Field | Default | What it does |
+|---|---|---|
+| `enable_grad_norm` | `False` | When `True`, compute adversarial gradients separately via `torch.autograd.grad`, normalize to unit L2 norm, then add to CFM gradients.  Prevents the adversarial signal from overwhelming the CFM anchor regardless of discriminator confidence. |
+
+### Discriminator augmentation (Exp 4)
+
+| Field | Default | What it does |
+|---|---|---|
+| `enable_disc_augmentation` | `False` | Apply augmentations to mels before feeding to discriminator. |
+| `disc_aug_prob` | `0.5` | Per-augmentation fire probability. |
+| `disc_aug_max_shift` | `16` | Max circular temporal shift (frames). |
+| `disc_aug_cutout_min` | `8` | Min temporal cutout width (frames). |
+| `disc_aug_cutout_max` | `32` | Max temporal cutout width (frames). |
+| `enable_freq_cutout` | `False` | Enable frequency-band cutout augmentation. |
+| `disc_aug_freq_cutout_min` | `8` | Min frequency cutout width (bins). |
+| `disc_aug_freq_cutout_max` | `32` | Max frequency cutout width (bins). |
 
 ### CFG (applies only to the CFM phase)
 

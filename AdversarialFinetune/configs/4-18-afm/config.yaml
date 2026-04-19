@@ -1,0 +1,79 @@
+pretrained_run: 4-16-wavenet
+pretrained_step: 0
+pretrained_vocaloflow_dir: ../VocaloFlow
+data_dir: ../Data/Rachie
+manifest_path: ../Data/Rachie/manifest.csv
+max_seq_len: 256
+max_dtw_cost: 100.0
+val_fraction: 0.05
+split_mode: song
+seed: 42
+ode_num_steps: 4
+ode_method: euler
+ode_grad_checkpoint: false
+enable_cfm: true
+enable_reconstruction: false
+enable_adversarial: true
+enable_feature_matching: false
+lambda_cfm: 1.0
+lambda_rec: 0.0
+lambda_adv: 1.0
+lambda_fm: 0.0
+lambda_cfm_final: 0.2
+cfg_dropout_prob: 0.2
+sigma_min: 0.0001
+disc_warmup_steps: 3000
+adv_ramp_steps: 3000
+gen_learning_rate: 2.0e-05
+disc_learning_rate: 0.0002
+disc_lr_warmup_steps: 1000
+adam_beta1: 0.8
+adam_beta2: 0.99
+weight_decay: 0.01
+grad_clip: 1.0
+reset_gen_optimizer: true
+ema_decay: 0.9999
+preserve_global_step: true
+batch_size: 8
+total_finetune_steps: 30000
+log_every: 50
+val_every: 1000
+eval_every: 3000
+save_every: 5000
+eval_num_samples: 8
+save_mel_plots: true
+num_mel_plots: 4
+disc_type: dit
+disc_channels:
+- 32
+- 64
+- 128
+- 256
+crop_specs:
+- - 32
+  - 64
+- - 64
+  - 128
+- - 128
+  - 128
+disc_dit_num_blocks: 4
+disc_dit_hidden_dim: 512
+disc_dit_num_heads: 8
+disc_dit_ffn_dim: 2048
+disc_dit_feature_blocks:
+- 1
+- 3
+disc_steps_per_gen: 1
+logit_center_weight: 0.01
+enable_grad_norm: true
+enable_disc_augmentation: true
+disc_aug_prob: 0.5
+disc_aug_max_shift: 16
+disc_aug_cutout_min: 8
+disc_aug_cutout_max: 32
+enable_freq_cutout: false
+disc_aug_freq_cutout_min: 8
+disc_aug_freq_cutout_max: 32
+run_name: 4-18-afm
+checkpoint_dir: ./checkpoints\4-18-afm
+log_dir: ./logs\4-18-afm
