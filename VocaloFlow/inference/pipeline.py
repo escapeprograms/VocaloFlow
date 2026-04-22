@@ -48,7 +48,7 @@ for _p in [_VOCALOFLOW_DIR, _SOULX_DIR]:
 from configs.default import VocaloFlowConfig
 from model.vocaloflow import VocaloFlow
 from inference.inference import sample_ode
-from utils.resample import resample_1d, resolve_phoneme_indirection
+from utils.resample import resample_1d, resample_2d, resolve_phoneme_indirection
 
 # ---------------------------------------------------------------------------
 # DataSynthesizer imports — loaded via importlib to avoid "utils" namespace
@@ -96,6 +96,8 @@ _DEFAULT_RMVPE = os.path.join(
 
 SR = 24000
 HOP = 480
+
+_PLBERT_DIR = os.path.join(_REPO_ROOT, "PL-BERT")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -346,6 +348,96 @@ def build_phoneme_ids(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Step 5b: PL-BERT feature extraction (live, for inference)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def build_plbert_frame_features(
+    notes: list[dict],
+    ms_per_tick: float,
+    total_frames: int,
+    phoneset_path: str,
+    plbert_dir: str = _PLBERT_DIR,
+    device: str = "cpu",
+) -> np.ndarray:
+    """Build per-frame PL-BERT features from USTX notes.
+
+    Runs the same pipeline as precompute_features.py but on-the-fly:
+    1. Build phoneme IDs from notes (same as build_phoneme_ids)
+    2. Convert English phonemes to IPA
+    3. Run PL-BERT for contextual embeddings
+    4. Expand to frame-level
+
+    Returns:
+        (total_frames, 768) float32 array.
+    """
+    plbert_mod = _import_from_path("plbert", os.path.join(plbert_dir, "plbert.py"))
+    text_utils = _import_from_path("text_utils", os.path.join(plbert_dir, "text_utils.py"))
+    arpabet_ipa = _import_from_path("arpabet_ipa", os.path.join(plbert_dir, "arpabet_ipa.py"))
+
+    import json
+    with open(phoneset_path) as f:
+        phone_set = json.load(f)
+
+    extractor = plbert_mod.PLBertFeatureExtractor(device=device)
+
+    # Build the expanded phoneme sequence (same as build_phoneme_ids)
+    words = [_lyric_to_word(n["lyric"]) for n in notes]
+    phoneme_strings = g2p_transform(words, lang="English")
+    note_durations = [n["duration_ticks"] * ms_per_tick / 1000.0 for n in notes]
+    phone2idx = _load_phone2idx(phoneset_path)
+
+    phoneme_ids_arr, phoneme_mask_arr = _build_mel2note(
+        note_durations, phoneme_strings, phone2idx, sr=SR, hop=HOP
+    )
+
+    if len(phoneme_mask_arr) == 0:
+        return np.zeros((total_frames, 768), dtype=np.float32)
+
+    # Extract PL-BERT features at phoneme level (P, 768)
+    P = len(phoneme_ids_arr)
+    features = np.zeros((P, 768), dtype=np.float32)
+
+    en_positions = []
+    for i, pid in enumerate(phoneme_ids_arr):
+        entry = phone_set[pid]
+        arpa = arpabet_ipa.phone_set_entry_to_arpabet(entry)
+        if arpa is not None:
+            en_positions.append((i, arpa))
+
+    if en_positions:
+        ipa_chars = []
+        char_to_pidx = []
+        for pidx, arpa in en_positions:
+            ipa = arpabet_ipa.arpabet_to_ipa(arpa)
+            if ipa is None:
+                continue
+            for c in ipa:
+                ipa_chars.append(c)
+                char_to_pidx.append(pidx)
+
+        if ipa_chars:
+            token_ids = text_utils.tokenize_ipa("".join(ipa_chars))
+            plbert_out = extractor.extract(token_ids).cpu().numpy()
+
+            from collections import Counter
+            for pos, pidx in enumerate(char_to_pidx):
+                features[pidx] += plbert_out[pos]
+            counts = Counter(char_to_pidx)
+            for pidx, count in counts.items():
+                features[pidx] /= count
+
+    # Expand to frame-level using phoneme_mask indirection
+    resolved_feats = features[np.clip(phoneme_mask_arr, 0, P - 1)]
+    resolved_feats = resample_2d(
+        torch.from_numpy(resolved_feats), total_frames, mode="nearest"
+    ).numpy()
+
+    print(f"[pipeline] Built PL-BERT features: {resolved_feats.shape}, "
+          f"non-zero frames: {np.any(resolved_feats != 0, axis=1).sum()}/{total_frames}")
+    return resolved_feats.astype(np.float32)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Step 6: Load model
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -388,6 +480,7 @@ def infer_chunked(
     method: str = "midpoint",
     device: torch.device = torch.device("cpu"),
     cfg_scale: float = 1.0,
+    plbert_features: np.ndarray | None = None,
 ) -> np.ndarray:
     """Run chunked ODE inference with overlap-add blending.
 
@@ -422,6 +515,7 @@ def infer_chunked(
         f = f0[start:end]
         v = voicing[start:end]
         ph = phoneme_ids[start:end]
+        pl = plbert_features[start:end] if plbert_features is not None else None
 
         # Pad to chunk_size if needed
         if length < chunk_size:
@@ -430,6 +524,8 @@ def infer_chunked(
             f = np.pad(f, (0, pad_len))
             v = np.pad(v, (0, pad_len))
             ph = np.pad(ph, (0, pad_len))
+            if pl is not None:
+                pl = np.pad(pl, ((0, pad_len), (0, 0)))
 
         # Padding mask and tensors
         mask = torch.zeros(1, chunk_size, dtype=torch.bool, device=device)
@@ -439,9 +535,11 @@ def infer_chunked(
         f_t = torch.from_numpy(f.astype(np.float32)).unsqueeze(0).to(device)
         v_t = torch.from_numpy(v.astype(np.float32)).unsqueeze(0).to(device)
         ph_t = torch.from_numpy(ph.astype(np.int64)).unsqueeze(0).to(device)
+        pl_t = (torch.from_numpy(pl.astype(np.float32)).unsqueeze(0).to(device)
+                if pl is not None else None)
 
         pred = sample_ode(model, pm_t, f_t, v_t, ph_t, num_steps, method, mask,
-                          cfg_scale=cfg_scale)
+                          cfg_scale=cfg_scale, plbert_features=pl_t)
         pred = pred[0, :length].cpu().numpy()
 
         # Blending window: fade in at left overlap, fade out at right overlap
@@ -518,6 +616,8 @@ def parse_args() -> argparse.Namespace:
                    help="Zero out all phoneme IDs (diagnostic: removes linguistic conditioning)")
     p.add_argument("--save-mels", action="store_true",
                    help="Save prior and output mel spectrograms as .npy alongside output WAV")
+    p.add_argument("--plbert-dir", default=os.path.join(_REPO_ROOT, "PL-BERT"),
+                   help="Path to PL-BERT directory (config, checkpoint, etc.)")
     return p.parse_args()
 
 
@@ -596,12 +696,22 @@ def main():
     # Step 7: Load model
     model = load_model(args.checkpoint, device)
 
+    # Step 7b: PL-BERT features (if model uses PL-BERT)
+    plbert_features = None
+    if model.config.use_plbert:
+        print("[pipeline] Model uses PL-BERT — extracting features...")
+        plbert_features = build_plbert_frame_features(
+            notes_data["notes"], notes_data["ms_per_tick"], T,
+            args.phoneset, plbert_dir=args.plbert_dir, device=str(device),
+        )
+
     # Step 8: Chunked inference
     output_mel = infer_chunked(
         model, prior_mel, f0, voicing, phoneme_ids,
         chunk_size=args.chunk_size, overlap=args.overlap,
         num_steps=args.num_ode_steps, method=args.ode_method,
         device=device, cfg_scale=args.cfg_scale,
+        plbert_features=plbert_features,
     )
 
     # ── Diagnostic: output mel vs prior mel ──

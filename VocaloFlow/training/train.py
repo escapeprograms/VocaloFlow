@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from configs.default import VocaloFlowConfig
 from model.vocaloflow import VocaloFlow
 from training.checkpoint import find_latest_checkpoint, load_checkpoint, save_checkpoint
+from training.energy_balance import EnergyBalancedWeight
 from training.flow_matching import FlowMatchingLoss
 from training.stft_loss import MultiResolutionSTFTLoss
 from training.lr_schedule import get_lr
@@ -94,8 +95,10 @@ def train(config: VocaloFlowConfig) -> None:
     else:
         raise ValueError(f"Unknown split_mode: {config.split_mode!r} (expected 'song' or 'random')")
 
-    train_ds = VocaloFlowDataset(train_df, config.data_dir, config.max_seq_len, training=True)
-    val_ds = VocaloFlowDataset(val_df, config.data_dir, config.max_seq_len, training=False)
+    train_ds = VocaloFlowDataset(train_df, config.data_dir, config.max_seq_len,
+                                 training=True, use_plbert=config.use_plbert)
+    val_ds = VocaloFlowDataset(val_df, config.data_dir, config.max_seq_len,
+                               training=False, use_plbert=config.use_plbert)
 
     train_loader = DataLoader(
         train_ds, batch_size=config.batch_size, shuffle=True,
@@ -128,11 +131,23 @@ def train(config: VocaloFlowConfig) -> None:
               f"STFT aux loss enabled (lambda={config.stft_loss_lambda}, "
               f"resolutions={config.stft_resolutions})")
 
+    eb_module = None
+    if config.energy_balanced_loss:
+        eb_module = EnergyBalancedWeight(
+            epsilon=config.energy_balance_epsilon,
+            mode=config.energy_balance_mode,
+        )
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] "
+              f"Energy-balanced loss enabled (lambda={config.energy_balance_lambda}, "
+              f"mode={config.energy_balance_mode})")
+
     criterion = FlowMatchingLoss(
         sigma_min=config.sigma_min,
         cfg_dropout_prob=config.cfg_dropout_prob,
         stft_loss=stft_module,
         stft_lambda=config.stft_loss_lambda if config.stft_loss_enabled else 0.0,
+        energy_balance=eb_module,
+        energy_balance_lambda=config.energy_balance_lambda,
     )
 
     # ── Restore state if resuming ─────────────────────────────────────────
@@ -161,6 +176,9 @@ def train(config: VocaloFlowConfig) -> None:
             voicing = batch["voicing"].to(device)
             phoneme_ids = batch["phoneme_ids"].to(device)
             padding_mask = batch["padding_mask"].to(device)
+            plbert_features = batch.get("plbert_features")
+            if plbert_features is not None:
+                plbert_features = plbert_features.to(device)
 
             # Update learning rate
             lr = get_lr(global_step, config.warmup_steps, config.total_steps, config.learning_rate)
@@ -168,7 +186,8 @@ def train(config: VocaloFlowConfig) -> None:
                 pg["lr"] = lr
 
             # Forward + backward
-            losses = criterion(model, x_0, x_1, f0, voicing, phoneme_ids, padding_mask)
+            losses = criterion(model, x_0, x_1, f0, voicing, phoneme_ids, padding_mask,
+                               plbert_features=plbert_features)
             loss = losses["total"]
 
             optimizer.zero_grad()
@@ -196,15 +215,29 @@ def train(config: VocaloFlowConfig) -> None:
                 writer.add_scalar("train/loss_velocity", velocity_val, global_step)
                 writer.add_scalar("train/loss_stft", stft_val, global_step)
                 writer.add_scalar("train/lr", lr, global_step)
-                wandb.log(
-                    {
-                        "train/loss": loss_val,
-                        "train/loss_velocity": velocity_val,
-                        "train/loss_stft": stft_val,
-                        "train/lr": lr,
-                    },
-                    step=global_step,
-                )
+                eb_std_val = losses["eb_std"].item()
+                log_dict = {
+                    "train/loss": loss_val,
+                    "train/loss_velocity": velocity_val,
+                    "train/loss_stft": stft_val,
+                    "train/lr": lr,
+                }
+                if config.energy_balanced_loss:
+                    log_dict["train/eb_weight_std"] = eb_std_val
+                    writer.add_scalar("train/eb_weight_std", eb_std_val, global_step)
+
+                grad_norms = {}
+                if hasattr(model, "plbert_proj") and model.plbert_proj.weight.grad is not None:
+                    grad_norms["train/grad_norm/plbert_proj"] = model.plbert_proj.weight.grad.norm().item()
+                if model.f0_embed.mlp[0].weight.grad is not None:
+                    grad_norms["train/grad_norm/f0_embed"] = model.f0_embed.mlp[0].weight.grad.norm().item()
+                if model.input_proj.weight.grad is not None:
+                    grad_norms["train/grad_norm/input_proj"] = model.input_proj.weight.grad.norm().item()
+                for k, v in grad_norms.items():
+                    writer.add_scalar(k, v, global_step)
+                log_dict.update(grad_norms)
+
+                wandb.log(log_dict, step=global_step)
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] "
                       f"step={global_step}  loss={loss_val:.4f}  "
                       f"vel={velocity_val:.4f}  stft={stft_val:.4f}  lr={lr:.2e}")
@@ -265,8 +298,12 @@ def validate(
             voicing = batch["voicing"].to(device)
             phoneme_ids = batch["phoneme_ids"].to(device)
             padding_mask = batch["padding_mask"].to(device)
+            plbert_features = batch.get("plbert_features")
+            if plbert_features is not None:
+                plbert_features = plbert_features.to(device)
 
-            losses = criterion(model, x_0, x_1, f0, voicing, phoneme_ids, padding_mask)
+            losses = criterion(model, x_0, x_1, f0, voicing, phoneme_ids, padding_mask,
+                               plbert_features=plbert_features)
             for k in sums:
                 sums[k] += losses[k].item()
             n_batches += 1

@@ -262,8 +262,9 @@ def _build_optimizers(
     config: FinetuneConfig,
     model: torch.nn.Module,
     discriminator: torch.nn.Module,
-) -> tuple[torch.optim.Optimizer, torch.optim.Optimizer]:
-    """Construct generator and discriminator optimizers."""
+    hf_discriminator: torch.nn.Module | None = None,
+) -> tuple[torch.optim.Optimizer, torch.optim.Optimizer, torch.optim.Optimizer | None]:
+    """Construct generator, discriminator, and optional HF discriminator optimizers."""
     opt_g = torch.optim.AdamW(
         model.parameters(),
         lr=config.gen_learning_rate,
@@ -276,7 +277,15 @@ def _build_optimizers(
         betas=(config.adam_beta1, config.adam_beta2),
         weight_decay=config.weight_decay,
     )
-    return opt_g, opt_d
+    opt_d_hf = None
+    if hf_discriminator is not None:
+        opt_d_hf = torch.optim.AdamW(
+            hf_discriminator.parameters(),
+            lr=config.hf_disc_learning_rate,
+            betas=(config.adam_beta1, config.adam_beta2),
+            weight_decay=config.weight_decay,
+        )
+    return opt_g, opt_d, opt_d_hf
 
 
 def _restore_state(
@@ -289,6 +298,8 @@ def _restore_state(
     resume_ckpt: dict | None,
     pt_ckpt: dict,
     pretrained_global_step: int,
+    hf_discriminator: torch.nn.Module | None = None,
+    opt_d_hf: torch.optim.Optimizer | None = None,
 ) -> tuple[int, int]:
     """Load weights into G/D/EMA/optimizers and return (global_step, start_global_step)."""
     if resume_ckpt is not None:
@@ -298,6 +309,14 @@ def _restore_state(
         discriminator.load_state_dict(resume_ckpt["discriminator_state_dict"])
         opt_g.load_state_dict(resume_ckpt["opt_g_state_dict"])
         opt_d.load_state_dict(resume_ckpt["opt_d_state_dict"])
+        # HF discriminator: load if present, else keep random init (backwards compat).
+        if hf_discriminator is not None and "hf_discriminator_state_dict" in resume_ckpt:
+            try:
+                hf_discriminator.load_state_dict(resume_ckpt["hf_discriminator_state_dict"])
+            except RuntimeError:
+                print(f"[{timestamp()}] HF discriminator architecture changed — starting from random init")
+        if opt_d_hf is not None and "opt_d_hf_state_dict" in resume_ckpt:
+            opt_d_hf.load_state_dict(resume_ckpt["opt_d_hf_state_dict"])
         global_step = int(resume_ckpt["step"])
         start_global_step = global_step - _infer_elapsed_ft_steps(
             config.checkpoint_dir, global_step,
@@ -454,6 +473,55 @@ def _dit_generator_adv_losses(
     return g_adv, l_fm
 
 
+# ── High-frequency auxiliary discriminator helpers ────────────────────────
+
+
+def _hf_discriminator_step(
+    x_1: torch.Tensor,
+    x_1_hat: torch.Tensor,
+    padding_mask: torch.Tensor,
+    hf_discriminator: torch.nn.Module,
+    opt_d_hf: torch.optim.Optimizer,
+    config: FinetuneConfig,
+    device: torch.device,
+    ft_step: int = 0,
+) -> tuple[float, float, float]:
+    """One HF DiT discriminator step on the upper mel-frequency band."""
+    hf_start = config.hf_disc_hf_start
+    x_1_hf = x_1[:, :, hf_start:]
+    x_1_hat_hf = x_1_hat.detach()[:, :, hf_start:]
+
+    real_scores, _ = hf_discriminator(x_1_hf, padding_mask)
+    fake_scores, _ = hf_discriminator(x_1_hat_hf, padding_mask)
+    d_loss = hinge_d_loss(real_scores, fake_scores)
+
+    if config.logit_center_weight > 0:
+        d_loss = d_loss + config.logit_center_weight * real_scores.mean() ** 2
+
+    d_real_mean = real_scores.mean().item()
+    d_fake_mean = fake_scores.mean().item()
+
+    opt_d_hf.zero_grad()
+    d_loss.backward()
+    torch.nn.utils.clip_grad_norm_(hf_discriminator.parameters(), config.grad_clip)
+    opt_d_hf.step()
+    return d_loss.item(), d_real_mean, d_fake_mean
+
+
+def _hf_generator_adv_loss(
+    x_1_hat: torch.Tensor,
+    padding_mask: torch.Tensor,
+    hf_discriminator: torch.nn.Module,
+    config: FinetuneConfig,
+    device: torch.device,
+    ft_step: int = 0,
+) -> torch.Tensor:
+    """Adversarial loss from the HF DiT discriminator for the generator."""
+    x_1_hat_hf = x_1_hat[:, :, config.hf_disc_hf_start:]
+    fake_scores, _ = hf_discriminator(x_1_hat_hf, padding_mask)
+    return hinge_g_loss(fake_scores)
+
+
 def _extra_d_steps(
     d_batch_iter,
     train_loader: DataLoader,
@@ -464,6 +532,8 @@ def _extra_d_steps(
     ft_step: int,
     crop_specs: list,
     device: torch.device,
+    hf_discriminator: torch.nn.Module | None = None,
+    opt_d_hf: torch.optim.Optimizer | None = None,
 ):
     """Run additional discriminator steps with fresh batches (no generator gradient)."""
     eff_lambda_adv = get_effective_lambda(
@@ -504,6 +574,13 @@ def _extra_d_steps(
                     crop_pairs, discriminator, opt_d, config, device,
                 )
 
+        if config.use_hf_discriminator and hf_discriminator is not None:
+            _hf_discriminator_step(
+                x_1, x_1_hat, padding_mask,
+                hf_discriminator, opt_d_hf, config, device,
+                ft_step=ft_step + 1_000_000 * (extra_idx + 1),
+            )
+
     return d_batch_iter
 
 
@@ -518,6 +595,8 @@ def _training_step(
     config: FinetuneConfig,
     ft_step: int,
     device: torch.device,
+    hf_discriminator: torch.nn.Module | None = None,
+    opt_d_hf: torch.optim.Optimizer | None = None,
 ) -> dict[str, float]:
     """One full training step: LR update, forward, D update, G update.
 
@@ -536,12 +615,24 @@ def _training_step(
     for pg in opt_d.param_groups:
         pg["lr"] = lr_d
 
+    lr_d_hf = 0.0
+    if opt_d_hf is not None:
+        lr_d_hf = get_lr(
+            ft_step, config.hf_disc_lr_warmup_steps,
+            config.total_finetune_steps, config.hf_disc_learning_rate,
+        )
+        for pg in opt_d_hf.param_groups:
+            pg["lr"] = lr_d_hf
+
     eff_lambda_adv = get_effective_lambda(
         ft_step, config, config.lambda_adv,
     ) if config.enable_adversarial else 0.0
     eff_lambda_fm = get_effective_lambda(
         ft_step, config, config.lambda_fm,
     ) if config.enable_feature_matching else 0.0
+    eff_lambda_hf_adv = get_effective_lambda(
+        ft_step, config, config.lambda_hf_adv,
+    ) if config.use_hf_discriminator else 0.0
 
     # === CFM phase ============================================
     if config.enable_cfm:
@@ -549,14 +640,17 @@ def _training_step(
             model, x_0, x_1, f0, voicing, phoneme_ids, padding_mask,
         )
         l_cfm = cfm_out["velocity"]
+        eb_std_val = cfm_out["eb_std"].item()
     else:
         l_cfm = torch.zeros((), device=device)
+        eb_std_val = 0.0
 
     # === ODE unroll phase =====================================
     need_ode = (
         config.enable_reconstruction
         or config.enable_adversarial
         or config.enable_feature_matching
+        or config.use_hf_discriminator
     )
     if need_ode:
         x_1_hat = unroll_ode(
@@ -596,6 +690,18 @@ def _training_step(
                 crop_pairs, discriminator, opt_d, config, device,
             )
 
+    # === HF discriminator update ==============================
+    d_hf_loss_val = 0.0
+    d_hf_real_mean = 0.0
+    d_hf_fake_mean = 0.0
+    if (config.use_hf_discriminator and hf_discriminator is not None
+            and x_1_hat is not None):
+        d_hf_loss_val, d_hf_real_mean, d_hf_fake_mean = _hf_discriminator_step(
+            x_1, x_1_hat, padding_mask,
+            hf_discriminator, opt_d_hf, config, device,
+            ft_step=ft_step,
+        )
+
     # === Generator losses ====================================
     l_rec = torch.zeros((), device=device)
     g_adv = torch.zeros((), device=device)
@@ -617,9 +723,19 @@ def _training_step(
                     crop_pairs, discriminator, config, eff_lambda_fm, device,
                 )
 
+    g_adv_hf = torch.zeros((), device=device)
+    if (config.use_hf_discriminator and hf_discriminator is not None
+            and x_1_hat is not None and eff_lambda_hf_adv > 0):
+        g_adv_hf = _hf_generator_adv_loss(
+            x_1_hat, padding_mask,
+            hf_discriminator, config, device,
+            ft_step=ft_step,
+        )
+
     current_lambda_cfm = get_lambda_cfm(ft_step, config)
     adv_grad_norm = 0.0
     cfm_grad_norm = 0.0
+    hf_adv_grad_norm = 0.0
 
     use_grad_norm = (
         config.enable_grad_norm
@@ -629,6 +745,7 @@ def _training_step(
 
     if use_grad_norm:
         # === Gradient normalization path ===
+        # Phase 1: CFM + rec backward — accumulate grads into p.grad
         non_adv_loss = current_lambda_cfm * l_cfm + config.lambda_rec * l_rec
         opt_g.zero_grad()
         non_adv_loss.backward(retain_graph=True)
@@ -637,11 +754,13 @@ def _training_step(
             model.parameters(), float("inf"),
         ).item()
 
+        # Phase 2: DiT adversarial grads (independently L2-normalized)
+        need_hf_grad = config.use_hf_discriminator and eff_lambda_hf_adv > 0
         adv_loss = eff_lambda_adv * g_adv + eff_lambda_fm * l_fm
         trainable_params = [p for p in model.parameters() if p.requires_grad]
         adv_grads = torch.autograd.grad(
             adv_loss, trainable_params,
-            retain_graph=False, allow_unused=True,
+            retain_graph=need_hf_grad, allow_unused=True,
         )
         adv_grad_tensors = [
             g if g is not None else torch.zeros_like(p)
@@ -657,9 +776,32 @@ def _training_step(
                 if p.grad is not None:
                     p.grad.add_(ag, alpha=scale)
 
+        # Phase 3: HF adversarial grads (independently L2-normalized)
+        if need_hf_grad:
+            hf_adv_loss = eff_lambda_hf_adv * g_adv_hf
+            hf_adv_grads = torch.autograd.grad(
+                hf_adv_loss, trainable_params,
+                retain_graph=False, allow_unused=True,
+            )
+            hf_adv_grad_tensors = [
+                g if g is not None else torch.zeros_like(p)
+                for g, p in zip(hf_adv_grads, trainable_params)
+            ]
+            hf_adv_grad_norm = sum(
+                (g ** 2).sum() for g in hf_adv_grad_tensors
+            ).sqrt().item()
+
+            if hf_adv_grad_norm > 1e-8:
+                hf_scale = 1.0 / hf_adv_grad_norm
+                for p, ag in zip(trainable_params, hf_adv_grad_tensors):
+                    if p.grad is not None:
+                        p.grad.add_(ag, alpha=hf_scale)
+
         torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
         opt_g.step()
-        total_g_val = non_adv_loss.item() + adv_loss.item()
+        total_g_val = non_adv_loss.item() + adv_loss.item() + (
+            (eff_lambda_hf_adv * g_adv_hf).item() if need_hf_grad else 0.0
+        )
     else:
         # === Original single-backward path ===
         total_g = (
@@ -667,6 +809,7 @@ def _training_step(
             + config.lambda_rec * l_rec
             + eff_lambda_adv * g_adv
             + eff_lambda_fm * l_fm
+            + eff_lambda_hf_adv * g_adv_hf
         )
         opt_g.zero_grad()
         total_g.backward()
@@ -690,6 +833,14 @@ def _training_step(
         "train/lr_d": lr_d,
         "train/d_real_mean": d_real_mean,
         "train/d_fake_mean": d_fake_mean,
+        "train/eb_weight_std": eb_std_val,
+        "train/loss_d_hf": d_hf_loss_val,
+        "train/loss_g_adv_hf": g_adv_hf.item(),
+        "train/lambda_hf_adv": eff_lambda_hf_adv,
+        "train/hf_adv_grad_norm": hf_adv_grad_norm,
+        "train/lr_d_hf": lr_d_hf,
+        "train/d_hf_real_mean": d_hf_real_mean,
+        "train/d_hf_fake_mean": d_hf_fake_mean,
     }
 
 
@@ -744,6 +895,11 @@ def _log_train_metrics(
         f"λcfm={metrics.get('train/lambda_cfm', 0):.3f} "
         f"adv_gn={metrics.get('train/adv_grad_norm', 0):.2e} "
         f"cfm_gn={metrics.get('train/cfm_grad_norm', 0):.2e}"
+        + (f" d_hf={metrics.get('train/loss_d_hf', 0):.4f}"
+           f" g_hf={metrics.get('train/loss_g_adv_hf', 0):.4f}"
+           f" D_hf(r)={metrics.get('train/d_hf_real_mean', 0):.3f}"
+           f" D_hf(f)={metrics.get('train/d_hf_fake_mean', 0):.3f}"
+           if metrics.get("train/lambda_hf_adv", 0) > 0 else "")
     )
 
 
@@ -859,12 +1015,30 @@ def train(config: FinetuneConfig) -> None:
     disc_params = sum(p.numel() for p in discriminator.parameters())
     print(f"[{timestamp()}] Discriminator ({config.disc_type}): {disc_params:,} params")
 
-    opt_g, opt_d = _build_optimizers(config, model, discriminator)
+    hf_discriminator = None
+    if config.use_hf_discriminator:
+        hf_mel_dim = vf_config.mel_channels - config.hf_disc_hf_start
+        hf_discriminator = DiTDiscriminator(
+            mel_dim=hf_mel_dim,
+            hidden_dim=config.hf_disc_hidden_dim,
+            num_blocks=config.hf_disc_num_blocks,
+            num_heads=config.hf_disc_num_heads,
+            ffn_dim=config.hf_disc_ffn_dim,
+            max_len=vf_config.max_seq_len + 1,
+            feature_block_indices=list(config.hf_disc_feature_blocks),
+        ).to(device)
+        hf_params = sum(p.numel() for p in hf_discriminator.parameters())
+        print(f"[{timestamp()}] HF Discriminator (DiT): {hf_params:,} params")
+
+    opt_g, opt_d, opt_d_hf = _build_optimizers(
+        config, model, discriminator, hf_discriminator,
+    )
 
     # ── Restore state ─────────────────────────────────────────────────────
     global_step, start_global_step = _restore_state(
         config, model, ema_model, discriminator, opt_g, opt_d,
         resume_ckpt, pt_ckpt, pretrained_global_step,
+        hf_discriminator=hf_discriminator, opt_d_hf=opt_d_hf,
     )
     del resume_ckpt, pt_ckpt
 
@@ -877,6 +1051,10 @@ def train(config: FinetuneConfig) -> None:
     criterion = build_cfm_loss(
         cfg_dropout_prob=config.cfg_dropout_prob,
         sigma_min=config.sigma_min,
+        energy_balanced_loss=config.energy_balanced_loss,
+        energy_balance_lambda=config.energy_balance_lambda,
+        energy_balance_epsilon=config.energy_balance_epsilon,
+        energy_balance_mode=config.energy_balance_mode,
     )
     criterion.train()
     crop_specs = [CropSpec(t, f) for t, f in config.crop_specs]
@@ -886,6 +1064,8 @@ def train(config: FinetuneConfig) -> None:
     # ── Training loop ─────────────────────────────────────────────────────
     model.train()
     discriminator.train()
+    if hf_discriminator is not None:
+        hf_discriminator.train()
 
     # Separate iterator for extra discriminator steps (fresh batches)
     d_batch_iter = iter(train_loader) if config.disc_steps_per_gen > 1 else None
@@ -900,6 +1080,7 @@ def train(config: FinetuneConfig) -> None:
             metrics = _training_step(
                 batch, model, discriminator, opt_g, opt_d,
                 criterion, crop_specs, config, ft_step, device,
+                hf_discriminator=hf_discriminator, opt_d_hf=opt_d_hf,
             )
 
             if d_batch_iter is not None and config.disc_steps_per_gen > 1:
@@ -907,6 +1088,7 @@ def train(config: FinetuneConfig) -> None:
                     d_batch_iter, train_loader,
                     model, discriminator, opt_d,
                     config, ft_step, crop_specs, device,
+                    hf_discriminator=hf_discriminator, opt_d_hf=opt_d_hf,
                 )
 
             _ema_update(ema_model, model, global_step, config)
@@ -919,17 +1101,22 @@ def train(config: FinetuneConfig) -> None:
                     ema_model, model, discriminator,
                     val_loader, criterion, writer, device, global_step,
                 )
+                if hf_discriminator is not None:
+                    hf_discriminator.train()
 
             if global_step > start_global_step and ft_step % config.eval_every == 0:
                 _run_heavy_evaluation(
                     ema_model, model, discriminator,
                     val_loader, config, writer, device, global_step,
                 )
+                if hf_discriminator is not None:
+                    hf_discriminator.train()
 
             if global_step > start_global_step and ft_step % config.save_every == 0:
                 save_checkpoint(
                     model, ema_model, discriminator, opt_g, opt_d,
                     global_step, config, vf_config, wandb.run.id,
+                    hf_discriminator=hf_discriminator, opt_d_hf=opt_d_hf,
                 )
 
             global_step += 1
@@ -938,6 +1125,7 @@ def train(config: FinetuneConfig) -> None:
     save_checkpoint(
         model, ema_model, discriminator, opt_g, opt_d,
         global_step, config, vf_config, wandb.run.id,
+        hf_discriminator=hf_discriminator, opt_d_hf=opt_d_hf,
     )
     writer.close()
     wandb.finish()

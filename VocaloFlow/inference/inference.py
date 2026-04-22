@@ -17,6 +17,7 @@ def sample_ode(
     padding_mask: Tensor | None = None,
     diagnostics: bool = True,
     cfg_scale: float = 1.0,
+    plbert_features: Tensor | None = None,
 ) -> Tensor:
     """Integrate the learned ODE from t=0 (prior) to t=1 (target).
 
@@ -48,16 +49,20 @@ def sample_ode(
         zeros_f0 = torch.zeros_like(f0)
         zeros_voicing = torch.zeros_like(voicing)
         zeros_ph = torch.zeros_like(phoneme_ids)
+        zeros_plbert = (torch.zeros_like(plbert_features)
+                        if plbert_features is not None else None)
 
     # Steps to log diagnostics (first, quarter, middle, last)
     _diag_steps = {0, num_steps // 4, num_steps // 2, num_steps - 1}
 
     def _get_velocity(x: Tensor, t_tensor: Tensor) -> Tensor:
         """Get velocity, applying CFG if enabled."""
-        v_cond = model(x, t_tensor, x_0, f0, voicing, phoneme_ids, padding_mask)
+        v_cond = model(x, t_tensor, x_0, f0, voicing, phoneme_ids, padding_mask,
+                       plbert_features=plbert_features)
         if not use_cfg:
             return v_cond
-        v_uncond = model(x, t_tensor, x_0, zeros_f0, zeros_voicing, zeros_ph, padding_mask)
+        v_uncond = model(x, t_tensor, x_0, zeros_f0, zeros_voicing, zeros_ph, padding_mask,
+                         plbert_features=zeros_plbert)
         return v_uncond + cfg_scale * (v_cond - v_uncond)
 
     for i in range(num_steps):

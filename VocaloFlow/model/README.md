@@ -7,14 +7,14 @@ Neural network architecture for the VocaloFlow conditional flow matching model (
 ### `VocaloFlow(config: VocaloFlowConfig)`
 Top-level nn.Module. Orchestrates all sub-components. Baseline (no pre-processing) ~26M params. Adding ConvNeXt adds ~8.4M. Adding WaveNet (8 blocks, skip=512) adds ~21.7M.
 
-**Forward signature**: `forward(x_t, t, prior_mel, f0, voicing, phoneme_ids, padding_mask=None) -> Tensor`
-- Inputs: x_t (B,T,128), t (B,), prior_mel (B,T,128), f0 (B,T), voicing (B,T), phoneme_ids (B,T) int64, padding_mask (B,T) bool
+**Forward signature**: `forward(x_t, t, prior_mel, f0, voicing, phoneme_ids, padding_mask=None, plbert_features=None) -> Tensor`
+- Inputs: x_t (B,T,128), t (B,), prior_mel (B,T,128), f0 (B,T), voicing (B,T), phoneme_ids (B,T) int64, padding_mask (B,T) bool, plbert_features (B,T,768) float optional
 - Output: (B,T,128) predicted velocity vector
 
-**Constructor**: Selects `BlurredPhonemeEmbedding` or `PhonemeEmbedding` based on `config.phoneme_blur_enabled`. Creates `ConvNeXtStack` if `config.num_convnext_blocks > 0` else `None`. Creates `WaveNetStack` if `config.num_wavenet_blocks > 0` else `None`. Both pre-processors can independently toggle on or off; if both are on, ConvNeXt runs first.
+**Constructor**: Selects `BlurredPhonemeEmbedding` or `PhonemeEmbedding` based on `config.phoneme_blur_enabled`. Creates `ConvNeXtStack` if `config.num_convnext_blocks > 0` else `None`. Creates `WaveNetStack` if `config.num_wavenet_blocks > 0` else `None`. Both pre-processors can independently toggle on or off; if both are on, ConvNeXt runs first. If `config.use_plbert`, creates `plbert_proj = Linear(768, 64)` to project frozen PL-BERT features down to the same dim as the learned phoneme embedding.
 
 **Forward flow**:
-1. `phoneme_embed(phoneme_ids)` → (B,T,64) — hard or blurred depending on config
+1. Phoneme conditioning: if `use_plbert` and `plbert_features` is provided, `plbert_proj(plbert_features)` → (B,T,64); otherwise `phoneme_embed(phoneme_ids)` → (B,T,64) — hard or blurred depending on config. Either path produces (B,T,64) `ph_emb`, so everything downstream is unchanged.
 2. `f0_embed(f0)` → (B,T,64) via learned MLP
 3. Per-stream LayerNorm on x_t (128), prior_mel (128), f0_emb (64), ph_emb (64). vuv (1) passed raw.
 4. Concatenate all → (B,T,385)

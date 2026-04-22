@@ -10,3 +10,4 @@ wavenet_dropout: 0.10
 phoneme_blur_enabled: false
 phoneme_blend_fraction: 0.2
 
+use_plbert: true

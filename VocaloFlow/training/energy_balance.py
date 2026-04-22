@@ -59,7 +59,7 @@ class EnergyBalancedWeight:
             weight = weight * w_time.unsqueeze(2)                           # (B, T, M)
 
         if self.mode == "both":
-            valid_mask = mask_f.unsqueeze(-1)                               # (B, T, 1)
+            valid_mask = mask_f.unsqueeze(-1).expand_as(weight)             # (B, T, M)
             weight_sum = (weight * valid_mask).sum(dim=(1, 2), keepdim=True)
             weight_count = valid_mask.sum(dim=(1, 2), keepdim=True).clamp(min=1)
             weight = weight * weight_count / weight_sum.clamp(min=1e-8)

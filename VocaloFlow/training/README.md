@@ -14,11 +14,11 @@ Optimal Transport Conditional Flow Matching loss with classifier-free guidance (
 - Optional STFT aux: `stft_loss(x_1_hat, x_1, padding_mask)` where `x_1_hat = x_t.detach() + (1-t)*v_pred` is the one-step output estimate. The `x_t.detach()` is intentional — prevents redundant grad paths through the interpolation.
 - Total: `velocity + stft_lambda * stft`
 
-**CFG dropout**: During training, with probability `cfg_dropout_prob`, conditioning signals (f0, voicing, phoneme_ids) are replaced with zeros for randomly selected batch elements. This trains the unconditional path needed for classifier-free guidance at inference. Prior mel (x_0) and x_t are never dropped.
+**CFG dropout**: During training, with probability `cfg_dropout_prob`, conditioning signals (f0, voicing, phoneme_ids, and plbert_features if present) are replaced with zeros for randomly selected batch elements. This trains the unconditional path needed for classifier-free guidance at inference. Prior mel (x_0) and x_t are never dropped.
 
 **Important — eval mode**: `FlowMatchingLoss` is an `nn.Module`, so its `.training` flag is independent of the model. Validation must call `criterion.eval()` (not just `model.eval()`) before running the val loop, otherwise CFG dropout will fire during validation and inflate val loss. `validate()` in `train.py` handles this with a `try/finally`.
 
-**Forward**: `forward(model, x_0, x_1, f0, voicing, phoneme_ids, padding_mask) -> dict[str, Tensor]`
+**Forward**: `forward(model, x_0, x_1, f0, voicing, phoneme_ids, padding_mask, plbert_features=None) -> dict[str, Tensor]`
 - Samples `t ~ Uniform(0,1)` per batch element
 - Applies CFG dropout (if training and cfg_dropout_prob > 0)
 - Constructs x_t from the interpolation formula

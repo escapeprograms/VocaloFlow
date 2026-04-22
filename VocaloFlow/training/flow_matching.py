@@ -36,12 +36,16 @@ class FlowMatchingLoss(nn.Module):
         cfg_dropout_prob: float = 0.0,
         stft_loss: nn.Module | None = None,
         stft_lambda: float = 0.0,
+        energy_balance: object | None = None,
+        energy_balance_lambda: float = 0.4,
     ) -> None:
         super().__init__()
         self.sigma_min = sigma_min
         self.cfg_dropout_prob = cfg_dropout_prob
         self.stft_loss = stft_loss
         self.stft_lambda = stft_lambda
+        self.energy_balance = energy_balance
+        self.energy_balance_lambda = energy_balance_lambda
 
     def forward(
         self,
@@ -52,6 +56,7 @@ class FlowMatchingLoss(nn.Module):
         voicing: Tensor,
         phoneme_ids: Tensor,
         padding_mask: Tensor | None = None,
+        plbert_features: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """Compute the flow matching loss (+ optional STFT aux) for one batch.
 
@@ -63,6 +68,7 @@ class FlowMatchingLoss(nn.Module):
             voicing: (B, T) V/UV flag.
             phoneme_ids: (B, T) resolved phoneme token IDs.
             padding_mask: (B, T) bool, True = valid frame.
+            plbert_features: (B, T, 768) frozen PL-BERT embeddings (optional).
 
         Returns:
             Dict with scalar tensors: {"total", "velocity", "stft"}.
@@ -91,17 +97,33 @@ class FlowMatchingLoss(nn.Module):
                 f0[drop_mask] = 0.0
                 voicing[drop_mask] = 0.0
                 phoneme_ids[drop_mask] = 0
+                if plbert_features is not None:
+                    plbert_features = plbert_features.clone()
+                    plbert_features[drop_mask] = 0.0
 
         # Predict velocity
-        v_pred = model(x_t, t, x_0, f0, voicing, phoneme_ids, padding_mask)
+        v_pred = model(x_t, t, x_0, f0, voicing, phoneme_ids, padding_mask,
+                       plbert_features=plbert_features)
 
-        # Velocity MSE, masked for padding
+        # Velocity MSE, optionally energy-balanced, masked for padding
         diff = (v_pred - v_target) ** 2  # (B, T, 128)
+
+        if self.training and self.energy_balance is not None:
+            eb_weights = self.energy_balance(x_1, padding_mask)  # (B, T, 128)
+            blend = (1.0 - self.energy_balance_lambda) + self.energy_balance_lambda * eb_weights
+            diff = diff * blend
+
         if padding_mask is not None:
             mask = padding_mask.unsqueeze(-1).float()
             velocity = (diff * mask).sum() / (mask.sum() * diff.shape[-1])
         else:
             velocity = diff.mean()
+
+        # EB diagnostic for logging
+        if self.training and self.energy_balance is not None:
+            eb_std = eb_weights[padding_mask].std() if padding_mask is not None else eb_weights.std()
+        else:
+            eb_std = torch.zeros((), device=device, dtype=velocity.dtype)
 
         # Optional STFT aux loss on one-step output estimate.
         # x_t.detach() is essential: v_pred already carries the parameter gradient;
@@ -114,4 +136,4 @@ class FlowMatchingLoss(nn.Module):
             stft = torch.zeros((), device=device, dtype=velocity.dtype)
 
         total = velocity + self.stft_lambda * stft
-        return {"total": total, "velocity": velocity, "stft": stft}
+        return {"total": total, "velocity": velocity, "stft": stft, "eb_std": eb_std}

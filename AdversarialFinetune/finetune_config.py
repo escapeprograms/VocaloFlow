@@ -47,6 +47,12 @@ class FinetuneConfig:
     cfg_dropout_prob: float = 0.2
     sigma_min: float = 1.0e-4
 
+    # -- Energy-Balanced Loss (CFM anchor) --------------------------------
+    energy_balanced_loss: bool = False
+    energy_balance_lambda: float = 0.4
+    energy_balance_epsilon: float = 1e-4
+    energy_balance_mode: str = "both"
+
     # -- Warmup schedule --------------------------------------------------
     disc_warmup_steps: int = 3000                 # steps from fine-tune start with lambda_adv = lambda_fm = 0
     adv_ramp_steps: int = 2000                    # linear ramp width after warmup
@@ -102,6 +108,18 @@ class FinetuneConfig:
     enable_freq_cutout: bool = False                  # optional frequency-band cutout
     disc_aug_freq_cutout_min: int = 8
     disc_aug_freq_cutout_max: int = 32
+
+    # -- High-frequency auxiliary discriminator ----------------------------
+    use_hf_discriminator: bool = False                   # master toggle; False = zero code paths change
+    hf_disc_hf_start: int = 64                           # first mel bin of HF band (inclusive)
+    hf_disc_num_blocks: int = 2
+    hf_disc_hidden_dim: int = 512
+    hf_disc_num_heads: int = 8
+    hf_disc_ffn_dim: int = 2048
+    hf_disc_feature_blocks: list = field(default_factory=lambda: [1])
+    lambda_hf_adv: float = 1.0                           # base weight (gradient norm bounds magnitude)
+    hf_disc_learning_rate: float = 2.0e-4
+    hf_disc_lr_warmup_steps: int = 1000
 
     # -- Paths ------------------------------------------------------------
     run_name: str = ""

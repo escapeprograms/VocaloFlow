@@ -82,7 +82,7 @@ conda activate vocaloflow
 python -m training.train --name my-experiment
 
 # Fresh run with YAML hyperparameter overrides
-python -m training.train --name 4-16-wavenet --config configs/cur_config.yaml
+python -m training.train --name 4-19-pl-bert --config configs/cur_config.yaml
 
 # Resume (auto-detects latest checkpoint; architecture config is pulled from the checkpoint)
 python -m training.train --resume my-experiment
@@ -120,8 +120,8 @@ Test script:
 python -m inference.pipeline 
     --ustx "../demo/let_it_go/let_it_go.ustx" 
     --prior-wav "../demo/let_it_go/prior_let_it_go.wav" 
-    --checkpoint ../AdversarialFinetune/checkpoints/4-18-afm2/checkpoint_70000.pt
-    --output "../demo/let_it_go/4-18-afm2/70000/output.wav"
+    --checkpoint ../AdversarialFinetune/checkpoints/4-20-energy-ft/checkpoint_75000.pt
+    --output "../demo/let_it_go/4-20-energy-ft/75000/output.wav"
     --save-mels
     --num-ode-steps 4
 
@@ -132,6 +132,13 @@ python -m inference.pipeline
     --output "../demo/we_are_charlie/4-18-afm2/output.wav"
     --save-mels
     --num-ode-steps 4
+
+python -m inference.pipeline 
+    --ustx "../demo/let_it_go/let_it_go.ustx" 
+    --prior-wav "../demo/let_it_go/prior_let_it_go.wav" 
+    --checkpoint "checkpoints/4-19-pl-bert/checkpoint_55000.pt"
+    --output "../demo/let_it_go/4-19-pl-bert/55000/output.wav"
+    --save-mels
 
 python -m inference.pipeline 
     --ustx "../demo/we_are_charlie/we_are_charlie.ustx" 
@@ -207,6 +214,7 @@ Single dataclass holding all hyperparameters. Key values:
 - `phoneme_vocab_size=2820`, `phoneme_embed_dim=64`, `f0_embed_dim=64`
 - `hidden_dim=512`, `num_heads=8`, `ffn_dim=2048`, `num_dit_blocks=6`, `dropout=0.1`
 - `input_channels=385` (128+128+64+64+1)
+- `use_plbert=False`, `plbert_feature_dim=768`, `plbert_proj_dim=64` — PL-BERT integration (toggled off by default; when on, replaces learned `PhonemeEmbedding` with frozen PL-BERT features projected 768->64, keeping `input_channels=385` unchanged)
 - `cfg_dropout_prob=0.2`, `cfg_scale=2.0`
 - `max_seq_len=256` — Covers p95 of sequence lengths
 - `batch_size=32`, `learning_rate=1e-4`, `total_steps=200_000`

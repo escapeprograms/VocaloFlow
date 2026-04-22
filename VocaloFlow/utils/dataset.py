@@ -36,11 +36,13 @@ class VocaloFlowDataset(Dataset):
         data_dir: str,
         max_seq_len: int = 256,
         training: bool = True,
+        use_plbert: bool = False,
     ) -> None:
         self.records = manifest_df.to_dict("records")
         self.data_dir = data_dir
         self.max_seq_len = max_seq_len
         self.training = training
+        self.use_plbert = use_plbert
 
     def __len__(self) -> int:
         return len(self.records)
@@ -65,12 +67,21 @@ class VocaloFlowDataset(Dataset):
         # phoneme_mask[t] is an index into phoneme_ids
         resolved_phonemes = resolve_phoneme_indirection(phoneme_ids, phoneme_mask)
 
+        # ── Load PL-BERT features (if enabled) ───────────────────────────
+        if self.use_plbert:
+            plbert_path = os.path.join(chunk_dir, "plbert_features.npy")
+            plbert_feats = np.load(plbert_path).astype(np.float32)  # (P, 768)
+            mask_clipped = np.clip(phoneme_mask, 0, len(plbert_feats) - 1)
+            plbert_frame = plbert_feats[mask_clipped]  # (T_mask, 768)
+
         # ── Convert to tensors ────────────────────────────────────────────
         target_mel = torch.from_numpy(target_mel)       # (T_target, 128)
         prior_mel = torch.from_numpy(prior_mel)         # (T_prior, 128)
         f0 = torch.from_numpy(f0)                       # (T_target,)
         voicing = torch.from_numpy(voicing)              # (T_target,)
         resolved_phonemes = torch.from_numpy(resolved_phonemes)  # (T_mask,)
+        if self.use_plbert:
+            plbert_frame = torch.from_numpy(plbert_frame)  # (T_mask, 768)
 
         T_target = target_mel.shape[0]
 
@@ -89,6 +100,8 @@ class VocaloFlowDataset(Dataset):
         resolved_phonemes = _match_len_1d(resolved_phonemes, T_target)
         f0 = _match_len_1d(f0, T_target)
         voicing = _match_len_1d(voicing, T_target)
+        if self.use_plbert:
+            plbert_frame = _match_len_2d(plbert_frame, T_target)
 
         # ── Crop or pad to max_seq_len ────────────────────────────────────
         length = min(T_target, self.max_seq_len)
@@ -103,6 +116,8 @@ class VocaloFlowDataset(Dataset):
             f0 = f0[start:start + self.max_seq_len]
             voicing = voicing[start:start + self.max_seq_len]
             resolved_phonemes = resolved_phonemes[start:start + self.max_seq_len]
+            if self.use_plbert:
+                plbert_frame = plbert_frame[start:start + self.max_seq_len]
         elif T_target < self.max_seq_len:
             pad_len = self.max_seq_len - T_target
             target_mel = F.pad(target_mel, (0, 0, 0, pad_len))
@@ -110,12 +125,14 @@ class VocaloFlowDataset(Dataset):
             f0 = F.pad(f0, (0, pad_len))
             voicing = F.pad(voicing, (0, pad_len))
             resolved_phonemes = F.pad(resolved_phonemes, (0, pad_len))
+            if self.use_plbert:
+                plbert_frame = F.pad(plbert_frame, (0, 0, 0, pad_len))
 
         # ── Padding mask ──────────────────────────────────────────────────
         padding_mask = torch.zeros(self.max_seq_len, dtype=torch.bool)
         padding_mask[:length] = True
 
-        return {
+        result = {
             "target_mel": target_mel,           # (max_seq_len, 128)
             "prior_mel": prior_mel,             # (max_seq_len, 128)
             "f0": f0,                           # (max_seq_len,)
@@ -124,3 +141,6 @@ class VocaloFlowDataset(Dataset):
             "length": length,                   # int
             "padding_mask": padding_mask,        # (max_seq_len,)
         }
+        if self.use_plbert:
+            result["plbert_features"] = plbert_frame  # (max_seq_len, 768)
+        return result

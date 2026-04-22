@@ -62,6 +62,7 @@ AdversarialFinetune/
 ├── evaluate_ft.py                # periodic 32-step vs 4-step inference eval
 ├── train_finetune.py             # main training entry point
 ├── dit_discriminator.py          # DiT transformer-based discriminator
+├── hf_discriminator.py           # REMOVED — HF disc now uses DiTDiscriminator directly
 ├── disc_augmentation.py          # discriminator input augmentation (Exp 4)
 ├── ft_utils/                     # reusable helpers (unique name — no collision)
 │   ├── imports.py                # import_from_path + sys.path bootstrap for VocaloFlow
@@ -255,6 +256,14 @@ N `TransformerBlock` layers (pre-norm, RoPE, GELU FFN) → LayerNorm on
 `forward(mel, padding_mask)` returns `(logits, features)` where
 `logits` is (B, 1) and `features` is a list of intermediate block outputs
 at `feature_block_indices` for feature matching.
+
+### HF Discriminator (Exp 7)
+
+**`hf_discriminator.py` has been removed.** The high-frequency auxiliary discriminator now uses `DiTDiscriminator` directly (same class as the full-spectrum discriminator) with `mel_dim=64`, `num_blocks=2`. Mel slicing (`mel[:, :, hf_start:]`) is done externally in `_hf_discriminator_step` and `_hf_generator_adv_loss` before passing to the DiT. No augmentation is applied to HF disc input.
+
+Config fields: `use_hf_discriminator` (master toggle), `hf_disc_hf_start`, `hf_disc_num_blocks`, `hf_disc_hidden_dim`, `hf_disc_num_heads`, `hf_disc_ffn_dim`, `hf_disc_feature_blocks`, `lambda_hf_adv`, `hf_disc_learning_rate`, `hf_disc_lr_warmup_steps`.
+
+Training integration: separate optimizer (`opt_d_hf`), separate step function (`_hf_discriminator_step`), separate generator loss (`_hf_generator_adv_loss`). In gradient normalization mode, HF adversarial gradients are independently L2-normalized before adding to generator `p.grad` (Phase 3, after DiT adv Phase 2). Checkpoint saves HF state conditionally; old checkpoints without HF keys load cleanly (HF disc starts from random init). Architecture-mismatched checkpoints (e.g. old PatchGAN HF state) are caught by try/except and fall back to random init.
 
 ### `disc_augmentation.py`
 

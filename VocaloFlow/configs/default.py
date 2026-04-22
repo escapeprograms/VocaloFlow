@@ -36,6 +36,11 @@ class VocaloFlowConfig:
     phoneme_blur_enabled: bool = False   # Use BlurredPhonemeEmbedding vs hard lookup
     phoneme_blend_fraction: float = 0.2 # Blend radius as fraction of shorter phoneme duration
 
+    # ── PL-BERT Integration ──────────────────────────────────────────────
+    use_plbert: bool = False             # Use frozen PL-BERT features instead of learned embedding
+    plbert_feature_dim: int = 768        # PL-BERT output dim (do not change)
+    plbert_proj_dim: int = 64            # Projection: 768 -> this (matches phoneme_embed_dim)
+
     # ── WaveNet Pre-processing ────────────────────────────────────────────
     # Optional alternative to ConvNeXt. Dilated conv + gated activation with
     # per-layer timestep conditioning (DiffSinger/PWG style). 0 = disabled.
@@ -74,6 +79,12 @@ class VocaloFlowConfig:
         [32, 8, 32],
         [64, 16, 64],
     ])
+
+    # ── Energy-Balanced Loss ─────────────────────────────────────────────
+    energy_balanced_loss: bool = False       # Enable inverse-energy weighting on velocity MSE
+    energy_balance_lambda: float = 0.4      # Interpolation: 0=uniform, 1=full EB
+    energy_balance_epsilon: float = 1e-4    # Division floor for numerical stability
+    energy_balance_mode: str = "both"       # "freq", "time", or "both"
 
     # ── Inference ─────────────────────────────────────────────────────────
     num_ode_steps: int = 32

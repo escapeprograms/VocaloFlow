@@ -44,7 +44,11 @@ class VocaloFlow(nn.Module):
             config = VocaloFlowConfig()
         self.config = config
 
-        # Phoneme embedding table (blurred or hard lookup)
+        # Phoneme conditioning: PL-BERT projection or learned embedding
+        self.use_plbert = config.use_plbert
+        if config.use_plbert:
+            self.plbert_proj = nn.Linear(config.plbert_feature_dim, config.plbert_proj_dim)
+
         if config.phoneme_blur_enabled:
             self.phoneme_embed = BlurredPhonemeEmbedding(
                 vocab_size=config.phoneme_vocab_size,
@@ -122,23 +126,28 @@ class VocaloFlow(nn.Module):
         voicing: Tensor,
         phoneme_ids: Tensor,
         padding_mask: Tensor | None = None,
+        plbert_features: Tensor | None = None,
     ) -> Tensor:
         """Predict the velocity field v_theta.
 
         Args:
-            x_t:         (B, T, 128) interpolated mel state.
-            t:           (B,) flow timestep in [0, 1].
-            prior_mel:   (B, T, 128) Vocaloid prior mel (x_0 conditioning).
-            f0:          (B, T) F0 contour (0 for unvoiced).
-            voicing:     (B, T) voiced/unvoiced binary flag.
-            phoneme_ids: (B, T) resolved phoneme token IDs.
-            padding_mask: (B, T) bool, True = valid frame.
+            x_t:             (B, T, 128) interpolated mel state.
+            t:               (B,) flow timestep in [0, 1].
+            prior_mel:       (B, T, 128) Vocaloid prior mel (x_0 conditioning).
+            f0:              (B, T) F0 contour (0 for unvoiced).
+            voicing:         (B, T) voiced/unvoiced binary flag.
+            phoneme_ids:     (B, T) resolved phoneme token IDs.
+            padding_mask:    (B, T) bool, True = valid frame.
+            plbert_features: (B, T, 768) frozen PL-BERT embeddings (optional).
 
         Returns:
             (B, T, 128) predicted velocity vector.
         """
         # 1. Embed phonemes: (B, T) -> (B, T, 64)
-        ph_emb = self.phoneme_embed(phoneme_ids)
+        if self.use_plbert and plbert_features is not None:
+            ph_emb = self.plbert_proj(plbert_features)
+        else:
+            ph_emb = self.phoneme_embed(phoneme_ids)
 
         # 2. Embed F0: (B, T) -> (B, T, 64)
         f0_emb = self.f0_embed(f0)

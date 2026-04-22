@@ -1,27 +1,36 @@
-# Experiment 3b: DiT discriminator, no reconstruction loss (4-17-dit-disc)
-# Starts from 4-16-wavenet pretrained checkpoint.
-# Drops L1 reconstruction loss; uses DiT-based discriminator (~13M params).
-# 2 discriminator steps per generator step with logit centering.
 
-pretrained_run: 4-16-wavenet
+pretrained_run: 4-19-pl-bert
 pretrained_step: 0
+
+
+energy_balanced_loss: true
 
 enable_cfm: true
 enable_reconstruction: false
 enable_adversarial: true
-enable_feature_matching: true
+enable_feature_matching: false
 
 lambda_cfm: 1.0
+lambda_cfm_final: 0.5
 lambda_rec: 0.0
 lambda_adv: 1.0
 lambda_fm: 0.0
+
+enable_grad_norm: true
+
+enable_disc_augmentation: true
+disc_aug_prob: 0.5
+disc_aug_max_shift: 16
+disc_aug_cutout_min: 8
+disc_aug_cutout_max: 32
+enable_freq_cutout: false
 
 ode_num_steps: 4
 ode_method: euler
 ode_grad_checkpoint: false
 
-disc_warmup_steps: 3000
-adv_ramp_steps: 2000
+disc_warmup_steps: 500
+adv_ramp_steps: 3000
 
 gen_learning_rate: 2.0e-5
 disc_learning_rate: 2.0e-4
@@ -34,12 +43,23 @@ val_every: 1000
 eval_every: 3000
 save_every: 5000
 
-# DiT discriminator
 disc_type: dit
 disc_dit_num_blocks: 4
 disc_dit_hidden_dim: 512
 disc_dit_num_heads: 8
 disc_dit_ffn_dim: 2048
 disc_dit_feature_blocks: [1, 3]
-disc_steps_per_gen: 2
+disc_steps_per_gen: 1
 logit_center_weight: 0.01
+
+# High-frequency auxiliary discriminator
+use_hf_discriminator: true
+hf_disc_hf_start: 64
+hf_disc_num_blocks: 2
+hf_disc_hidden_dim: 512
+hf_disc_num_heads: 8
+hf_disc_ffn_dim: 2048
+hf_disc_feature_blocks: [1]
+lambda_hf_adv: 1.0
+hf_disc_learning_rate: 2.0e-4
+hf_disc_lr_warmup_steps: 1000

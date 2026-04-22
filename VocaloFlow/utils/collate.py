@@ -21,7 +21,7 @@ def vocaloflow_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, tor
             length:       (B,)
             padding_mask: (B, T)
     """
-    return {
+    result = {
         "target_mel": torch.stack([item["target_mel"] for item in batch]),
         "prior_mel": torch.stack([item["prior_mel"] for item in batch]),
         "f0": torch.stack([item["f0"] for item in batch]),
@@ -30,3 +30,8 @@ def vocaloflow_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, tor
         "length": torch.tensor([item["length"] for item in batch], dtype=torch.long),
         "padding_mask": torch.stack([item["padding_mask"] for item in batch]),
     }
+    if "plbert_features" in batch[0]:
+        result["plbert_features"] = torch.stack(
+            [item["plbert_features"] for item in batch]
+        )
+    return result

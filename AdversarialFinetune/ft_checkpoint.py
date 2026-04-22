@@ -47,6 +47,8 @@ def save_checkpoint(
     config: FinetuneConfig,
     vf_config,
     wandb_run_id: Optional[str] = None,
+    hf_discriminator: nn.Module | None = None,
+    opt_d_hf: torch.optim.Optimizer | None = None,
 ) -> str:
     """Save an adversarial-fine-tune checkpoint and return the written path.
 
@@ -76,22 +78,24 @@ def save_checkpoint(
     """
     os.makedirs(config.checkpoint_dir, exist_ok=True)
     path = os.path.join(config.checkpoint_dir, f"checkpoint_{step}.pt")
-    torch.save(
-        {
-            "step": step,
-            "model_state_dict": model.state_dict(),
-            "ema_model_state_dict": ema_model.state_dict(),
-            "discriminator_state_dict": discriminator.state_dict(),
-            "opt_g_state_dict": opt_g.state_dict(),
-            "opt_d_state_dict": opt_d.state_dict(),
-            # INSTANCE on purpose — VocaloFlow's load_model reads .attributes.  See docstring.
-            "config": vf_config,
-            # DICT on purpose — portable across sys.path contexts.  See docstring.
-            "finetune_config": dataclasses.asdict(config),
-            "wandb_run_id": wandb_run_id,
-        },
-        path,
-    )
+    ckpt = {
+        "step": step,
+        "model_state_dict": model.state_dict(),
+        "ema_model_state_dict": ema_model.state_dict(),
+        "discriminator_state_dict": discriminator.state_dict(),
+        "opt_g_state_dict": opt_g.state_dict(),
+        "opt_d_state_dict": opt_d.state_dict(),
+        # INSTANCE on purpose — VocaloFlow's load_model reads .attributes.  See docstring.
+        "config": vf_config,
+        # DICT on purpose — portable across sys.path contexts.  See docstring.
+        "finetune_config": dataclasses.asdict(config),
+        "wandb_run_id": wandb_run_id,
+    }
+    if hf_discriminator is not None:
+        ckpt["hf_discriminator_state_dict"] = hf_discriminator.state_dict()
+    if opt_d_hf is not None:
+        ckpt["opt_d_hf_state_dict"] = opt_d_hf.state_dict()
+    torch.save(ckpt, path)
     print(f"[{timestamp()}] Saved checkpoint: {path}")
     return path
 

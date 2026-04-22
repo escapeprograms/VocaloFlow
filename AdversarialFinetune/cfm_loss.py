@@ -23,19 +23,39 @@ _fm_mod = import_from_path(
 FlowMatchingLoss = _fm_mod.FlowMatchingLoss
 
 
-def build_cfm_loss(cfg_dropout_prob: float, sigma_min: float = 1.0e-4) -> nn.Module:
-    """Return a FlowMatchingLoss with STFT disabled.
+def build_cfm_loss(
+    cfg_dropout_prob: float,
+    sigma_min: float = 1.0e-4,
+    energy_balanced_loss: bool = False,
+    energy_balance_lambda: float = 0.4,
+    energy_balance_epsilon: float = 1e-4,
+    energy_balance_mode: str = "both",
+) -> nn.Module:
+    """Return a FlowMatchingLoss with STFT disabled, optionally energy-balanced.
 
     Callers use this as ``criterion(model, x_0, x_1, f0, voicing, phoneme_ids,
-    padding_mask)``; it returns ``{"total", "velocity", "stft"}`` with ``stft``
-    always zero.  ``total`` equals ``velocity`` for our setup.
+    padding_mask)``; it returns ``{"total", "velocity", "stft", "eb_std"}`` with
+    ``stft`` always zero.  ``total`` equals ``velocity`` for our setup.
 
     CFG dropout fires internally during ``criterion.training``; call
     ``criterion.eval()`` for validation.
     """
+    eb_module = None
+    if energy_balanced_loss:
+        _eb_mod = import_from_path(
+            "vf_energy_balance",
+            os.path.join(VOCALOFLOW_DIR, "training", "energy_balance.py"),
+        )
+        eb_module = _eb_mod.EnergyBalancedWeight(
+            epsilon=energy_balance_epsilon,
+            mode=energy_balance_mode,
+        )
+
     return FlowMatchingLoss(
         sigma_min=sigma_min,
         cfg_dropout_prob=cfg_dropout_prob,
         stft_loss=None,
         stft_lambda=0.0,
+        energy_balance=eb_module,
+        energy_balance_lambda=energy_balance_lambda,
     )

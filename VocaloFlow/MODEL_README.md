@@ -38,24 +38,26 @@ The mel values are in SoulX-Singer's normalized log-mel space; the `mel_to_soulx
 
 ## 3. Inputs to the Model
 
-The forward pass takes **seven** named arguments. Five of them are per-frame signals shaped `(B, T)` or `(B, T, 128)`. Two are scalar/auxiliary.
+The forward pass takes **eight** named arguments. Six of them are per-frame signals shaped `(B, T)`, `(B, T, 128)`, or `(B, T, 768)`. Two are scalar/auxiliary.
 
-| Name           | Shape          | Dtype   | Range / Meaning                                              |
-|----------------|----------------|---------|--------------------------------------------------------------|
-| `x_t`          | (B, T, 128)    | float32 | The interpolated mel state at flow timestep t. The variable that is being denoised/transformed. |
-| `t`            | (B,)           | float32 | Flow timestep ∈ [0, 1]. 0 = prior, 1 = target.               |
-| `prior_mel`    | (B, T, 128)    | float32 | The Vocaloid mel — the source of the OT path. Constant per sample, used as conditioning. |
-| `f0`           | (B, T)         | float32 | Fundamental frequency in Hz. 0 means unvoiced.               |
-| `voicing`      | (B, T)         | float32 | Binary mask: 1 = voiced frame, 0 = unvoiced.                 |
-| `phoneme_ids`  | (B, T)         | int64   | Per-frame token IDs into a 2820-entry phoneme vocabulary. 0 = pad. |
-| `padding_mask` | (B, T)         | bool    | True = real frame, False = right-padding to fill the batch.  |
+| Name              | Shape          | Dtype   | Range / Meaning                                              |
+|-------------------|----------------|---------|--------------------------------------------------------------|
+| `x_t`             | (B, T, 128)    | float32 | The interpolated mel state at flow timestep t. The variable that is being denoised/transformed. |
+| `t`               | (B,)           | float32 | Flow timestep ∈ [0, 1]. 0 = prior, 1 = target.               |
+| `prior_mel`       | (B, T, 128)    | float32 | The Vocaloid mel — the source of the OT path. Constant per sample, used as conditioning. |
+| `f0`              | (B, T)         | float32 | Fundamental frequency in Hz. 0 means unvoiced.               |
+| `voicing`         | (B, T)         | float32 | Binary mask: 1 = voiced frame, 0 = unvoiced.                 |
+| `phoneme_ids`     | (B, T)         | int64   | Per-frame token IDs into a 2820-entry phoneme vocabulary. 0 = pad. |
+| `padding_mask`    | (B, T)         | bool    | True = real frame, False = right-padding to fill the batch.  |
+| `plbert_features` | (B, T, 768)    | float32 | Optional. Frozen PL-BERT contextual embeddings per frame. Only used when `use_plbert=True`; otherwise `None`. |
 
 **Important nuances:**
 
 - **`x_t` is not the prior**. During training, `x_t` is constructed as `x_t = (1 - (1-σ)·t)·x_0 + t·x_1` where `x_0 = prior_mel` and `x_1 = target_mel`. At inference, `x_t` evolves via ODE integration starting from `x_0`. The model needs **both** `x_t` and the original `prior_mel` because `x_t` is a blend, and the model has to know the clean prior to predict the right velocity.
 - **`f0` and `voicing` are technically redundant**: `voicing == (f0 > 0)`. We pass both because the embedding paths are different and the model can learn to use them differently.
 - **`phoneme_ids` arrives already resolved**. Raw data on disk has a `phoneme_mask` that is an *index* into a per-chunk `phoneme_ids` array; the dataset resolves this indirection before producing the tensor the model sees.
-- **All five per-frame signals are aligned to the same time axis** (the target_mel's time dimension) by the dataset. Resampling is linear for continuous signals (prior mel, F0) and nearest-neighbor for discrete signals (voicing, phoneme IDs).
+- **`plbert_features` is optional**. When `use_plbert=True`, frozen PL-BERT embeddings replace the learned phoneme embedding. The PL-BERT output (768-dim) is projected to 64 dims via a Linear layer, keeping `input_channels=385` unchanged. When PL-BERT is not used or features are not provided, the model falls back to the learned `PhonemeEmbedding`.
+- **All per-frame signals are aligned to the same time axis** (the target_mel's time dimension) by the dataset. Signals are **padded or truncated** (not resampled/interpolated) to match `target_mel`'s T — truncated if longer, zero-padded on the right if shorter.
 - **`B` is batch size, `T` is sequence length** (typically 256 frames during training, variable at inference time chunked to 256 with overlap).
 
 ---
@@ -91,15 +93,23 @@ VocaloFlow is a **6-layer Diffusion Transformer (DiT)** with **optional ConvNeXt
 | `dropout`              |   0.1 | Applied in every DiT + ConvNeXt block            |
 | `max_seq_len`          |   256 | Max frames per chunk (~5.12s)                    |
 | `phoneme_vocab_size`   |  2820 | Full SoulX-Singer phone_set.json vocabulary      |
-| `phoneme_blur_enabled` |  True | Use BlurredPhonemeEmbedding (False = hard lookup) |
-| `phoneme_blend_fraction`| 0.3  | Blend radius as fraction of shorter phoneme duration |
+| `phoneme_blur_enabled` | False | Use BlurredPhonemeEmbedding (True) vs hard lookup (False) |
+| `phoneme_blend_fraction`| 0.2  | Blend radius as fraction of shorter phoneme duration |
+| `use_plbert`           | False | Use frozen PL-BERT features instead of learned phoneme embedding |
+| `plbert_feature_dim`   |   768 | PL-BERT output dimension (do not change)             |
+| `plbert_proj_dim`      |    64 | Projection: 768 → this (matches phoneme_embed_dim)   |
 
 ### 5.2 Forward pipeline (in order)
 
-**Step 1 — Embed phonemes (with optional boundary blurring)**
-`phoneme_ids: (B, T) int64` → look up in a learned `nn.Embedding(2820, 64, padding_idx=0)` → `(B, T, 64)`. Token ID 0 maps to a zero vector (padding).
+**Step 1 — Embed phonemes (PL-BERT, blurred, or hard lookup)**
 
-When `phoneme_blur_enabled=True` (default), `BlurredPhonemeEmbedding` is used instead of a hard lookup. Near phoneme boundaries, this produces a weighted average of adjacent phoneme embeddings instead of a sharp transition. The blend region scales with the shorter adjacent phoneme's duration — a 30ms stop consonant gets a ~9ms blend window, while a 500ms vowel gets ~150ms. See section 5.5 for details.
+There are three mutually exclusive phoneme conditioning paths, selected by config:
+
+1. **PL-BERT (when `use_plbert=True`)**: Frozen PL-BERT contextual embeddings `(B, T, 768)` are projected through `Linear(768, 64)` → `(B, T, 64)`. The learned `PhonemeEmbedding` is bypassed entirely. PL-BERT provides richer, context-dependent linguistic features compared to a per-token lookup table. See section 5.8 for details.
+2. **Blurred embedding (when `phoneme_blur_enabled=True` and PL-BERT is off)**: `BlurredPhonemeEmbedding` produces a weighted average of adjacent phoneme embeddings near boundaries. The blend region scales with the shorter adjacent phoneme's duration — a 30ms stop consonant gets a ~6ms blend window, while a 500ms vowel gets ~100ms. See section 5.5 for details.
+3. **Hard lookup (default)**: `phoneme_ids: (B, T) int64` → look up in a learned `nn.Embedding(2820, 64, padding_idx=0)` → `(B, T, 64)`. Token ID 0 maps to a zero vector (padding).
+
+All three paths produce `(B, T, 64)`, so the downstream concatenation and input projection are identical regardless of which path is used.
 
 **Step 2 — Embed F0**
 `f0: (B, T)` → MLP `Linear(1, 64) → SiLU → Linear(64, 64)` → `(B, T, 64)`. Continuous Hz values are projected to a 64-dim dense vector. This replaces the v1 design of using raw F0 as a single channel, which underparameterized the pitch signal.
@@ -247,6 +257,20 @@ The dropout in steps 7 and (FFN-)4 is the **only** stochastic regularization in 
 
 **Disable**: Set `num_wavenet_blocks=0` in config (the default). Does not conflict with `num_convnext_blocks`.
 
+### 5.8 PL-BERT contextual phoneme conditioning (NEW)
+
+**Motivation**: The learned `PhonemeEmbedding` maps each phoneme token to a fixed vector regardless of its linguistic context — the "t" in "stop" gets the same embedding as the "t" in "time." PL-BERT (Phoneme-Level BERT) is a pre-trained masked language model that produces contextual embeddings: each phoneme's representation depends on its surrounding phonemes and word context. This gives the model richer linguistic conditioning without increasing the number of trainable parameters (PL-BERT is frozen).
+
+**Design**: When `use_plbert=True`, the model creates a `plbert_proj: Linear(768, 64)` layer that projects frozen PL-BERT outputs from 768 dimensions down to 64 (matching `phoneme_embed_dim`). In the forward pass, if `plbert_features` is provided, the model computes `ph_emb = plbert_proj(plbert_features)` and skips the learned `PhonemeEmbedding` entirely. If `plbert_features` is `None` (e.g., at inference when PL-BERT is unavailable), the model falls back to the learned embedding.
+
+**Data pipeline**: During training, PL-BERT features are pre-computed and stored as `plbert_features.npy` (shape `(P, 768)` where P = number of phonemes in the chunk). The dataset indexes these by the phoneme mask to produce frame-level features `(T, 768)`. During inference, the pipeline extracts PL-BERT features on-the-fly: USTX phonemes → Arpabet → IPA → PL-BERT tokenizer → contextual embeddings → per-phoneme averaging → frame-level expansion.
+
+**CFG interaction**: During CFG dropout, `plbert_features` is zeroed along with f0, voicing, and phoneme_ids — the unconditional path receives no linguistic signal from any source.
+
+**Parameter count**: Only the 768×64 + 64 = 49,216 parameters in `plbert_proj` are trainable. PL-BERT itself is frozen and not part of the model's parameter budget.
+
+**Disable**: Set `use_plbert=False` (the default). The model will use the learned `PhonemeEmbedding` or `BlurredPhonemeEmbedding` depending on `phoneme_blur_enabled`.
+
 ### 5.7 Why narrow-and-deep instead of wide-and-shallow
 
 The v1 architecture was 2 layers, hidden_dim 1024, FFN 4096 (~35M params). This was found to overfit quickly, because the massive FFN layers act as lookup tables — they have enough capacity to memorize training examples without learning generalizable representations. v2 redistributes the same parameter budget across more sequential processing steps (6 layers, 512/2048), which acts as an implicit regularizer: the model has to do meaningful computation at every layer rather than caching answers.
@@ -280,10 +304,18 @@ This is the key property of OT-CFM: there is a single right answer for the veloc
 ### 6.3 The loss
 
 ```
-L = E_{(x_0, x_1, cond), t} [ ‖ v_θ(x_t, t, cond) - v_target ‖² ]
+L_velocity = E_{(x_0, x_1, cond), t} [ ‖ v_θ(x_t, t, cond) - v_target ‖² ]
 ```
 
 Computed as masked mean squared error: differences are summed only over valid (non-padded) frames, then divided by `(num_valid_frames × mel_channels)`.
+
+The full training loss combines the velocity MSE with two optional auxiliary terms:
+
+```
+L_total = L_velocity + stft_lambda · L_stft
+```
+
+where `L_velocity` may be energy-balanced (see 6.5) and `L_stft` is the multi-resolution STFT loss (see 6.6). Both auxiliary terms are disabled by default.
 
 ### 6.4 Inference: ODE integration
 
@@ -298,6 +330,50 @@ For each step:    v = v_θ(x_t, t, cond)
 
 Default: 32 ODE steps with the **midpoint method** (each step does two model forward passes — one to estimate the velocity at the midpoint, one to apply it). For long sequences, inference is chunked into 256-frame windows with linear-crossfade overlap (default 16 frames overlap).
 
+### 6.5 Energy-balanced loss weighting (NEW, optional)
+
+**Motivation**: Standard MSE treats all mel bins and frames equally. In singing voice, high-energy regions (sustained vowels, loud notes) dominate the loss, while low-energy regions (consonants, voiceless frames, quiet high-frequency bins) contribute very little gradient signal. This causes the model to prioritize vowel reconstruction at the expense of consonant clarity. Energy-balanced weighting inverts this: low-energy regions get higher weight, encouraging the model to reconstruct them more accurately.
+
+**Algorithm** (`EnergyBalancedWeight`): Computes inverse-energy weights on the target mel `x_1`:
+
+- **"freq" mode**: Per-frequency-bin energy = sum over time. Invert, normalize to mean 1.0.
+- **"time" mode**: Per-frame energy = sum over frequencies. Invert, normalize to mean 1.0.
+- **"both" mode** (default): Product of both axes' weights, renormalized to mean 1.0.
+- An epsilon floor (`energy_balance_epsilon`, default 1e-4) prevents division by zero for silent regions.
+
+**Application**: The per-element velocity MSE `(v_pred - v_target)²` is multiplied by a blended weight:
+
+```
+w = (1 - energy_balance_lambda) + energy_balance_lambda · eb_weights
+```
+
+With `energy_balance_lambda=0` this is uniform weighting (standard MSE). With `lambda=1.0` it is full energy-balanced weighting. Default `lambda=0.4` interpolates between both.
+
+**Training only**: Energy-balanced weights are computed and applied only during training (`self.training`). During validation, the loss is standard unweighted MSE for comparability.
+
+**Diagnostics**: The standard deviation of energy-balance weights over valid frames is logged as `train/eb_weight_std` — a proxy for how uneven the energy distribution is across the batch.
+
+**References**: Inspired by RFWave (ICLR 2025) and YingMusic-SVC (arXiv:2512.04793).
+
+**Config**: `energy_balanced_loss=False` (default disabled), `energy_balance_lambda=0.4`, `energy_balance_epsilon=1e-4`, `energy_balance_mode="both"`.
+
+### 6.6 Multi-resolution STFT auxiliary loss (NEW, optional)
+
+**Motivation**: The velocity MSE loss operates in the mel domain and penalizes per-frame, per-bin differences. It does not directly penalize temporal modulation patterns — two velocity predictions with the same per-frame error could produce very different temporal envelopes after ODE integration. An STFT loss on the reconstructed output penalizes spectral structure at multiple time scales, encouraging temporally coherent predictions.
+
+**Algorithm** (`MultiResolutionSTFTLoss`):
+
+1. Compute a **one-step output estimate**: `x_1_hat = x_t.detach() + (1 - t) · v_pred`. This approximates what the final mel would look like if the current velocity were applied for the remaining flow path. `x_t.detach()` is essential: `v_pred` already carries the parameter gradient; letting grad flow back through `x_t` would add a redundant path via the frozen data tensors `x_0`/`x_1`.
+2. Treat each of the 128 mel channels as an **independent 1D time series**.
+3. For each resolution `(n_fft, hop, win)` in `stft_resolutions` (default: `[[16,4,16], [32,8,32], [64,16,64]]`):
+   - Compute STFT of `x_1_hat` and `x_1` along the time axis.
+   - **Spectral convergence**: `‖|S_hat| - |S_target|‖_F / ‖|S_target|‖_F` (Frobenius norm ratio).
+   - **Log-magnitude L1**: `|log|S_hat| - log|S_target||` averaged over bins.
+   - Sum both terms. Skip resolutions where `T < win_size`.
+4. Average across all valid resolutions.
+
+**Config**: `stft_loss_enabled=False` (default disabled), `stft_loss_lambda=0.1` (weight in total loss), `stft_resolutions=[[16,4,16],[32,8,32],[64,16,64]]`.
+
 ---
 
 ## 7. Classifier-Free Guidance (CFG)
@@ -311,6 +387,7 @@ During training, with probability `cfg_dropout_prob` = 0.2, the conditioning sig
 - `f0` → all zeros
 - `voicing` → all zeros
 - `phoneme_ids` → all zeros (all PAD)
+- `plbert_features` → all zeros (when PL-BERT is enabled)
 - `prior_mel` is **NOT** dropped (it's the core signal)
 - `x_t` is **NOT** dropped (it's the noisy state, not conditioning)
 
@@ -336,14 +413,15 @@ v_guided = v_uncond + cfg_scale · (v_cond - v_uncond)
 
 ## 8. Regularization Techniques
 
-| Technique           | Where             | Strength | Purpose                                          |
-|---------------------|-------------------|---------:|--------------------------------------------------|
-| Dropout             | Every DiT block (attn out, FFN out), every WaveNet block (input) | p=0.1 | Generic regularization        |
-| CFG dropout         | Loss function     | p=0.2  | Trains unconditional path, prevents over-reliance on any single conditioning signal |
-| Weight decay        | AdamW optimizer   | 0.01   | L2 regularization                                |
-| Gradient clipping   | After backward    | norm=1 | Prevents loss spikes during early training        |
-| Per-stream LayerNorm| Input stage       | always | Prevents one input stream from dominating         |
-| EMA model           | Outside optimizer step | decay=0.9999 (with warmup, see 9.2) | Smoothed weights for inference, lower variance val loss |
+| Technique             | Where             | Strength | Purpose                                          |
+|-----------------------|-------------------|---------:|--------------------------------------------------|
+| Dropout               | Every DiT block (attn out, FFN out), every WaveNet block (input) | p=0.1 | Generic regularization        |
+| CFG dropout           | Loss function     | p=0.2  | Trains unconditional path, prevents over-reliance on any single conditioning signal |
+| Weight decay          | AdamW optimizer   | 0.01   | L2 regularization                                |
+| Gradient clipping     | After backward    | norm=1 | Prevents loss spikes during early training        |
+| Per-stream LayerNorm  | Input stage       | always | Prevents one input stream from dominating         |
+| EMA model             | Outside optimizer step | decay=0.9999 (with warmup, see 9.2) | Smoothed weights for inference, lower variance val loss |
+| Energy-balanced loss  | Loss function (optional) | λ=0.4 | Upweights low-energy regions (consonants, unvoiced frames) to improve clarity (see 6.5) |
 
 ---
 
@@ -381,7 +459,7 @@ The **warmup factor `(step+1)/(step+10)`** is critical. Without it, the EMA deca
 
 ### 9.3 Validation
 
-Validation runs the EMA model under `torch.no_grad()` over the entire val set with `model.eval()` (disables dropout) and `criterion.eval()` (disables CFG dropout). Returns the average per-batch loss. Validation runs every `val_every` steps (default 100, configurable).
+Validation runs the EMA model under `torch.no_grad()` over the entire val set with `model.eval()` (disables dropout) and `criterion.eval()` (disables CFG dropout and energy-balanced weighting). Returns the average per-batch loss. Validation runs every `val_every` steps (default 1000, configurable).
 
 ---
 
@@ -389,7 +467,7 @@ Validation runs the EMA model under `torch.no_grad()` over the entire val set wi
 
 ### 10.1 Per-chunk files on disk
 
-Each training chunk has six `.npy` files plus a row in `manifest.csv`:
+Each training chunk has six `.npy` files (seven when PL-BERT is used) plus a row in `manifest.csv`:
 
 | File              | Shape       | Dtype | Notes                                                 |
 |-------------------|-------------|-------|-------------------------------------------------------|
@@ -399,6 +477,7 @@ Each training chunk has six `.npy` files plus a row in `manifest.csv`:
 | `target_voicing.npy` | (T_target,)  | float32 | Binary V/UV mask                                 |
 | `phoneme_ids.npy` | (P,)            | int32 | Per-chunk phoneme token sequence                  |
 | `phoneme_mask.npy`| (T_mask,)       | int32 | Per-frame INDEX into phoneme_ids (indirection!)   |
+| `plbert_features.npy` | (P, 768)    | float32 | Pre-computed frozen PL-BERT embeddings per phoneme (only when `use_plbert=True`) |
 
 **Two critical pitfalls** the dataset class handles automatically:
 1. **The phoneme indirection**: `phoneme_mask[t]` is *not* a phoneme token ID, it's an *index* into `phoneme_ids`. The actual token is `phoneme_ids[phoneme_mask[t]]`. Forgetting this gives garbage embeddings.
@@ -406,15 +485,16 @@ Each training chunk has six `.npy` files plus a row in `manifest.csv`:
 
 ### 10.2 In-memory transformation per sample
 
-1. Load all six `.npy` files.
-2. Resolve phoneme indirection.
-3. Resample everything to `target_mel`'s T.
-4. Crop or pad to `max_seq_len = 256`:
+1. Load all `.npy` files (six base files, plus `plbert_features.npy` if `use_plbert=True`).
+2. Resolve phoneme indirection: `phoneme_mask[t]` → `phoneme_ids[phoneme_mask[t]]`.
+3. If PL-BERT enabled: index `plbert_features` by clipped `phoneme_mask` to expand from `(P, 768)` to `(T_mask, 768)`.
+4. **Pad or truncate** all signals to `target_mel`'s T: signals longer than T are truncated, shorter ones are zero-padded on the right. No interpolation or resampling is performed.
+5. Crop or pad to `max_seq_len = 256`:
    - If T > 256 and training: random crop start.
    - If T > 256 and eval: start crop (deterministic).
    - If T < 256: zero-pad on the right.
-5. Build a `padding_mask` (True for the `length = min(T, 256)` real frames, False for padding).
-6. Return a dict with all tensors at length 256.
+6. Build a `padding_mask` (True for the `length = min(T, 256)` real frames, False for padding).
+7. Return a dict with all tensors at length 256.
 
 Manifest filtering: rows with `dtw_cost > max_dtw_cost` (default 100) are excluded — these are chunks where the alignment between Vocaloid and human voice was too poor for the pair to be useful training signal.
 
@@ -425,7 +505,7 @@ Two strategies, switchable via `config.split_mode`:
 - **`"song"` (default)**: split by `dali_id`. All chunks from a given song go entirely to either train or val. This is the strict, leakage-free split — val songs are completely held out.
 - **`"random"`**: split by individual chunk. Chunks from the same song can appear on both sides. Useful as a baseline to compare against, since it eliminates "song difficulty" as a confounder.
 
-Default `val_fraction = 0.2` (20% of songs).
+Default `val_fraction = 0.05` (5% of songs).
 
 ---
 
@@ -436,7 +516,14 @@ Default `val_fraction = 0.2` (20% of songs).
 - **Config snapshots** saved to `configs/<run_name>/config.yaml` on first launch (not overwritten on resume). Uses `VocaloFlowConfig.to_yaml()` / `from_yaml()`.
 - **Resume support**: Pass `--resume <run_name>` (or just `--name` with existing checkpoints). Auto-detects the latest checkpoint, restores model/EMA/optimizer state and step counter, and resumes the wandb run via its saved run ID.
 - **Checkpoint utilities** live in `training/checkpoint.py`: `find_latest_checkpoint()`, `save_checkpoint()`, `load_checkpoint()`.
-- **TensorBoard**: scalars `train/loss`, `train/lr`, `val/loss` written to `logs/<run_name>/`. View with `tensorboard --logdir logs`.
+- **TensorBoard**: scalars written to `logs/<run_name>/`. View with `tensorboard --logdir logs`. Logged scalars:
+  - `train/loss` — total training loss
+  - `train/loss_velocity` — velocity MSE component
+  - `train/loss_stft` — STFT auxiliary loss component (0 if disabled)
+  - `train/eb_weight_std` — standard deviation of energy-balance weights (0 if disabled)
+  - `train/lr` — current learning rate
+  - `val/loss` — validation loss (EMA model, no CFG dropout, no energy-balanced weighting)
+  - Gradient norms for key modules (input projection, DiT blocks, output projection, ConvNeXt/WaveNet if enabled)
 - **Weights & Biases**: same scalars + gradient histograms via `wandb.watch`. Project = `archimedesli/VocaloFlow`.
 
 ---
@@ -498,6 +585,8 @@ For a batch size B and sequence length T = `max_seq_len = 256`:
 | `x_t` (input)                  | (B, 256, 128)          | float32                            |
 | `prior_mel` (input)            | (B, 256, 128)          | float32                            |
 | `voicing` (input)              | (B, 256)               | float32 (binary)                   |
+| `plbert_features` (input, opt) | (B, 256, 768)          | float32 (frozen PL-BERT)           |
+| After `plbert_proj` (opt)      | (B, 256, 64)           | replaces phoneme_embed when PL-BERT active |
 | Concatenated input             | (B, 256, 385)          | 128+128+64+64+1                    |
 | After `input_proj`             | (B, 256, 512)          | hidden representation              |
 | `t` (input)                    | (B,)                   | float32 ∈ [0, 1]                   |
@@ -527,6 +616,8 @@ For a batch size B and sequence length T = `max_seq_len = 256`:
 - **GRN** — Global Response Normalization. A normalization technique from ConvNeXtV2 that adds inter-channel competition by normalizing each channel relative to the L2 norm across the time dimension.
 - **WaveNet residual block** — A convolutional block from Parallel WaveGAN / DiffSinger using dilated non-causal convolutions with gated activations (tanh · sigmoid) and per-layer conditioning injection. Multiple blocks with cyclic dilations form a stack that provides exponentially growing receptive fields. Used here as an optional alternative to ConvNeXt pre-processing, with the key differences being: standard (non-depthwise) convolutions for full cross-channel mixing, binary gating for selective transient passing, and timestep conditioning at every layer.
 - **Blurred phoneme boundaries** — Instead of a hard per-frame phoneme embedding lookup, boundary frames get a weighted average of adjacent phoneme embeddings. The blend region scales with phoneme duration, mimicking natural coarticulation.
+- **PL-BERT** — Phoneme-Level BERT. A pre-trained masked language model that produces contextual phoneme embeddings — each phoneme's representation depends on its surrounding context, unlike a fixed embedding table. Used frozen (no gradient) with a trainable Linear projection from 768 to 64 dimensions. Provides richer linguistic conditioning for the flow matching model.
+- **Energy-balanced loss** — An inverse-energy weighting scheme that upweights low-energy mel regions (consonants, voiceless frames, quiet high-frequency bins) in the velocity MSE. Prevents the loss from being dominated by loud sustained vowels. Blended with uniform weighting via a lambda parameter.
 - **Phoneme indirection** — On disk, `phoneme_mask` stores per-frame indices into a per-chunk `phoneme_ids` array. The actual token is `phoneme_ids[phoneme_mask[t]]`. The dataset resolves this before producing the model input.
 - **Prior mel** — The Vocaloid-rendered mel-spectrogram (`x_0`). The starting point of the OT path.
 - **Target mel** — The high-quality singer mel-spectrogram (`x_1`). The endpoint of the OT path. Only available during training.
