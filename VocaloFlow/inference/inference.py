@@ -18,6 +18,7 @@ def sample_ode(
     diagnostics: bool = True,
     cfg_scale: float = 1.0,
     plbert_features: Tensor | None = None,
+    speaker_embedding: Tensor | None = None,
 ) -> Tensor:
     """Integrate the learned ODE from t=0 (prior) to t=1 (target).
 
@@ -58,11 +59,13 @@ def sample_ode(
     def _get_velocity(x: Tensor, t_tensor: Tensor) -> Tensor:
         """Get velocity, applying CFG if enabled."""
         v_cond = model(x, t_tensor, x_0, f0, voicing, phoneme_ids, padding_mask,
-                       plbert_features=plbert_features)
+                       plbert_features=plbert_features,
+                       speaker_embedding=speaker_embedding)
         if not use_cfg:
             return v_cond
         v_uncond = model(x, t_tensor, x_0, zeros_f0, zeros_voicing, zeros_ph, padding_mask,
-                         plbert_features=zeros_plbert)
+                         plbert_features=zeros_plbert,
+                         speaker_embedding=speaker_embedding)  # NOT zeroed
         return v_uncond + cfg_scale * (v_cond - v_uncond)
 
     for i in range(num_steps):

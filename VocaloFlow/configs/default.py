@@ -41,6 +41,11 @@ class VocaloFlowConfig:
     plbert_feature_dim: int = 768        # PL-BERT output dim (do not change)
     plbert_proj_dim: int = 64            # Projection: 768 -> this (matches phoneme_embed_dim)
 
+    # ── Speaker Embedding ─────────────────────────────────────────────────
+    use_speaker_embedding: bool = False  # Inject ECAPA-TDNN embedding into timestep conditioning
+    speaker_embedding_dim: int = 192     # ECAPA-TDNN output dimension
+    global_speaker_embedding_path: str = ""  # Path to a single .pt embedding file (shared across all chunks)
+
     # ── WaveNet Pre-processing ────────────────────────────────────────────
     # Optional alternative to ConvNeXt. Dilated conv + gated activation with
     # per-layer timestep conditioning (DiffSinger/PWG style). 0 = disabled.

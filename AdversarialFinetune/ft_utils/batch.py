@@ -36,6 +36,16 @@ def unpack_batch(batch: dict, device: torch.device) -> BatchTensors:
     )
 
 
+def unpack_optional_features(batch: dict, device: torch.device) -> dict:
+    """Extract optional conditioning features (PL-BERT, speaker embedding)."""
+    result = {}
+    if "plbert_features" in batch:
+        result["plbert_features"] = batch["plbert_features"].to(device)
+    if "speaker_embedding" in batch:
+        result["speaker_embedding"] = batch["speaker_embedding"].to(device)
+    return result
+
+
 def timestamp() -> str:
     """Return ``HH:MM:SS`` for use as a log-line prefix."""
     return datetime.now().strftime("%H:%M:%S")

@@ -151,7 +151,8 @@ Named `ft_checkpoint` to avoid any chance of collision with
 ### `ode_unroll.py`
 
 `unroll_ode(model, x_0, f0, voicing, phoneme_ids, padding_mask,
-num_steps, method, grad_checkpoint)`:
+num_steps, method, grad_checkpoint, plbert_features=None,
+speaker_embedding=None)`:
 
 * Mirrors `VocaloFlow/inference/inference.py::sample_ode` but without
   `@torch.no_grad`, without CFG, without diagnostic prints.
@@ -205,6 +206,9 @@ AdversarialPostnet package.
   * `unpack_batch(batch, device)` — returns `BatchTensors`; moves the six
     standard VocaloFlow keys onto `device`.  Used by every training and
     validation loop (replaces four copies of the same `.to(device)` block).
+  * `unpack_optional_features(batch, device)` — returns a dict with
+    `plbert_features` and/or `speaker_embedding` if present in the batch.
+    Keeps `BatchTensors` unchanged (no breaking tuple unpacking).
   * `timestamp()` — `"HH:MM:SS"` string for log-line prefixes.
 * `ft_utils/paths.py`
   * `derive_run_paths(config)` — sets `config.checkpoint_dir` and
@@ -253,9 +257,14 @@ Architecture: input projection → prepend learnable [CLS] token →
 N `TransformerBlock` layers (pre-norm, RoPE, GELU FFN) → LayerNorm on
 [CLS] position → Linear(hidden_dim, 1) scalar logit.
 
-`forward(mel, padding_mask)` returns `(logits, features)` where
-`logits` is (B, 1) and `features` is a list of intermediate block outputs
-at `feature_block_indices` for feature matching.
+`forward(mel, padding_mask, speaker_embedding=None, plbert_features=None)`
+returns `(logits, features)` where `logits` is (B, 1) and `features` is a
+list of intermediate block outputs at `feature_block_indices` for feature
+matching.  When `use_plbert_input=True`, PL-BERT features are projected
+(768→128, zero-init) and concatenated with mel.  When
+`use_speaker_input=True`, speaker embedding is projected (192→64,
+zero-init), broadcast across time, and concatenated.  `input_proj`
+dimension adjusts accordingly.  `TransformerBlock` layers are unchanged.
 
 ### HF Discriminator (Exp 7)
 
@@ -409,6 +418,22 @@ individual losses in isolation.
 | `enable_freq_cutout` | `False` | Enable frequency-band cutout augmentation. |
 | `disc_aug_freq_cutout_min` | `8` | Min frequency cutout width (bins). |
 | `disc_aug_freq_cutout_max` | `32` | Max frequency cutout width (bins). |
+
+### Speaker embedding + conditioned discriminator (Exp 8)
+
+| Field | Default | What it does |
+|---|---|---|
+| `use_speaker_embedding` | `False` | Load per-chunk speaker embeddings and enable generator `speaker_proj` conditioning. Requires `VocaloFlowConfig.use_speaker_embedding=True` on the pretrained model. |
+| `disc_use_plbert_input` | `False` | Concatenate PL-BERT features (projected 768→`disc_plbert_proj_dim`) to discriminator mel input. |
+| `disc_plbert_proj_dim` | `128` | Discriminator PL-BERT projection output dim. Zero-init. |
+| `disc_use_speaker_input` | `False` | Concatenate speaker embedding (projected 192→`disc_speaker_proj_dim`) to discriminator mel input. |
+| `disc_speaker_proj_dim` | `64` | Discriminator speaker embedding projection output dim. Zero-init. |
+
+Generator: `speaker_proj = Linear(192, 512)` (zero-init) adds to timestep conditioning `c`.
+Discriminator: projections broadcast across time and concatenate with mel before `input_proj`.
+PL-BERT features receive the same `augment_mel` augmentations as mel (same RNG seed).
+Checkpoint loading uses `strict=False` for new generator keys (`speaker_proj.*`).
+Gradient norms for all projection layers logged as `train/{gen,disc}_{speaker,plbert}_proj_grad_norm`.
 
 ### CFG (applies only to the CFM phase)
 

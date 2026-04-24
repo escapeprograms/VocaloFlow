@@ -23,7 +23,7 @@ Verifies all 5 required `.npy` files exist on disk for a manifest row.
 
 ## dataset.py
 
-### `VocaloFlowDataset(manifest_df, data_dir, max_seq_len=256, training=True, use_plbert=False)`
+### `VocaloFlowDataset(manifest_df, data_dir, max_seq_len=256, training=True, use_plbert=False, use_speaker_embedding=False, global_speaker_embedding_path="")`
 PyTorch Dataset that handles three data challenges:
 
 1. **Phoneme indirection**: `phoneme_mask.npy` contains indices into `phoneme_ids.npy`. Resolved at load time: `resolved = phoneme_ids[clip(phoneme_mask, 0, len-1)]`.
@@ -32,9 +32,12 @@ PyTorch Dataset that handles three data challenges:
 
 3. **Variable lengths**: Random crop (training) or start crop (eval) to `max_seq_len`. Shorter sequences are zero-padded. A `padding_mask` (bool, True=valid) is returned.
 
-**Returns dict** with keys: `target_mel` (T,128), `prior_mel` (T,128), `f0` (T,), `voicing` (T,), `phoneme_ids` (T,), `length` (int), `padding_mask` (T,). When `use_plbert=True`, also returns `plbert_features` (T,768) — loaded from `plbert_features.npy` (P,768) and expanded to frame-level via `phoneme_mask` indirection (same mechanism as phoneme_ids resolution), then cropped/padded to `max_seq_len`.
+**Returns dict** with keys: `target_mel` (T,128), `prior_mel` (T,128), `f0` (T,), `voicing` (T,), `phoneme_ids` (T,), `length` (int), `padding_mask` (T,). When `use_plbert=True`, also returns `plbert_features` (T,768) — loaded from `plbert_features.npy` (P,768) and expanded to frame-level via `phoneme_mask` indirection (same mechanism as phoneme_ids resolution), then cropped/padded to `max_seq_len`. When `use_speaker_embedding=True`, also returns `speaker_embedding` (D_spk,) — either loaded once from `global_speaker_embedding_path` (a `.pt` file, shared across all items) or per-chunk from `speaker_embedding.npy`.
 
 ## collate.py
 
 ### `vocaloflow_collate_fn(batch) -> dict`
-Stacks a list of dataset items into batched tensors. All items are already the same length (max_seq_len) so this is a straightforward `torch.stack`. Conditionally includes `plbert_features` if present in batch items.
+Stacks a list of dataset items into batched tensors. All items are already the same length (max_seq_len) so this is a straightforward `torch.stack`. Conditionally includes `plbert_features` and `speaker_embedding` if present in batch items.
+
+### `validate_batch_signals(batch, *, expect_plbert=False, expect_speaker_embedding=False) -> None`
+Raises `RuntimeError` if config-expected optional signals are missing from a batch. Called once at training startup (after dataloaders are built) in both VocaloFlow `train.py` and AdversarialFinetune `train_finetune.py` to catch config/data mismatches early.

@@ -37,12 +37,21 @@ class VocaloFlowDataset(Dataset):
         max_seq_len: int = 256,
         training: bool = True,
         use_plbert: bool = False,
+        use_speaker_embedding: bool = False,
+        global_speaker_embedding_path: str = "",
     ) -> None:
         self.records = manifest_df.to_dict("records")
         self.data_dir = data_dir
         self.max_seq_len = max_seq_len
         self.training = training
         self.use_plbert = use_plbert
+        self.use_speaker_embedding = use_speaker_embedding
+
+        self._global_speaker_emb = None
+        if use_speaker_embedding and global_speaker_embedding_path:
+            self._global_speaker_emb = torch.load(
+                global_speaker_embedding_path, weights_only=True,
+            ).float()
 
     def __len__(self) -> int:
         return len(self.records)
@@ -74,6 +83,14 @@ class VocaloFlowDataset(Dataset):
             mask_clipped = np.clip(phoneme_mask, 0, len(plbert_feats) - 1)
             plbert_frame = plbert_feats[mask_clipped]  # (T_mask, 768)
 
+        # ── Load speaker embedding (if enabled) ──────────────────────────
+        if self.use_speaker_embedding:
+            if self._global_speaker_emb is not None:
+                spk_emb = self._global_speaker_emb
+            else:
+                spk_path = os.path.join(chunk_dir, "speaker_embedding.npy")
+                spk_emb = np.load(spk_path).astype(np.float32)  # (D_spk,)
+
         # ── Convert to tensors ────────────────────────────────────────────
         target_mel = torch.from_numpy(target_mel)       # (T_target, 128)
         prior_mel = torch.from_numpy(prior_mel)         # (T_prior, 128)
@@ -82,6 +99,8 @@ class VocaloFlowDataset(Dataset):
         resolved_phonemes = torch.from_numpy(resolved_phonemes)  # (T_mask,)
         if self.use_plbert:
             plbert_frame = torch.from_numpy(plbert_frame)  # (T_mask, 768)
+        if self.use_speaker_embedding and not isinstance(spk_emb, torch.Tensor):
+            spk_emb = torch.from_numpy(spk_emb)  # (D_spk,)
 
         T_target = target_mel.shape[0]
 
@@ -143,4 +162,6 @@ class VocaloFlowDataset(Dataset):
         }
         if self.use_plbert:
             result["plbert_features"] = plbert_frame  # (max_seq_len, 768)
+        if self.use_speaker_embedding:
+            result["speaker_embedding"] = spk_emb  # (D_spk,)
         return result

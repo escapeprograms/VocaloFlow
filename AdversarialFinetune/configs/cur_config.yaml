@@ -1,9 +1,9 @@
 
-pretrained_run: 4-19-pl-bert
+pretrained_run: 4-23-embed
 pretrained_step: 0
 
 
-energy_balanced_loss: true
+energy_balanced_loss: false
 
 enable_cfm: true
 enable_reconstruction: false
@@ -53,7 +53,7 @@ disc_steps_per_gen: 1
 logit_center_weight: 0.01
 
 # High-frequency auxiliary discriminator
-use_hf_discriminator: true
+use_hf_discriminator: false
 hf_disc_hf_start: 64
 hf_disc_num_blocks: 2
 hf_disc_hidden_dim: 512
@@ -63,3 +63,14 @@ hf_disc_feature_blocks: [1]
 lambda_hf_adv: 1.0
 hf_disc_learning_rate: 2.0e-4
 hf_disc_lr_warmup_steps: 1000
+
+# Enable speaker embedding in the dataloader/pipeline
+use_speaker_embedding: true
+
+# Conditioned discriminator — PL-BERT input
+disc_use_plbert_input: true
+disc_plbert_proj_dim: 128                     # default
+
+# Conditioned discriminator — speaker embedding input
+disc_use_speaker_input: true
+disc_speaker_proj_dim: 64                     # default

@@ -1,6 +1,6 @@
 """Reusable helpers shared across AdversarialFinetune modules."""
 
-from ft_utils.batch import BatchTensors, timestamp, unpack_batch
+from ft_utils.batch import BatchTensors, timestamp, unpack_batch, unpack_optional_features
 from ft_utils.imports import (
     ADV_POSTNET_DIR,
     REPO_ROOT,
@@ -20,4 +20,5 @@ __all__ = [
     "setup_vocaloflow_sys_path",
     "timestamp",
     "unpack_batch",
+    "unpack_optional_features",
 ]

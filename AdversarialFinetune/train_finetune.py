@@ -38,6 +38,7 @@ from ft_utils import (
     setup_vocaloflow_sys_path,
     timestamp,
     unpack_batch,
+    unpack_optional_features,
 )
 
 setup_vocaloflow_sys_path()
@@ -47,7 +48,7 @@ from configs.default import VocaloFlowConfig          # noqa: E402
 from model.vocaloflow import VocaloFlow               # noqa: E402
 from utils.config_utils import rebuild_dataclass_tolerant  # noqa: E402
 from utils.dataset import VocaloFlowDataset           # noqa: E402
-from utils.collate import vocaloflow_collate_fn       # noqa: E402
+from utils.collate import vocaloflow_collate_fn, validate_batch_signals  # noqa: E402
 from utils.data_helpers import (                      # noqa: E402
     load_manifest, filter_manifest, split_by_song, split_random,
 )
@@ -164,8 +165,11 @@ def validate_cfm(
     try:
         for batch in val_loader:
             x_0, x_1, f0, voicing, phoneme_ids, padding_mask = unpack_batch(batch, device)
+            optional = unpack_optional_features(batch, device)
             losses = criterion(
                 ema_model, x_0, x_1, f0, voicing, phoneme_ids, padding_mask,
+                plbert_features=optional.get("plbert_features"),
+                speaker_embedding=optional.get("speaker_embedding"),
             )
             vel_sum += losses["velocity"].item()
             n += 1
@@ -229,6 +233,7 @@ def _save_config_snapshot(config: FinetuneConfig) -> None:
 
 def _build_dataloaders(
     config: FinetuneConfig,
+    vf_config: VocaloFlowConfig | None = None,
 ) -> tuple[DataLoader, DataLoader]:
     """Construct train and val DataLoaders from the manifest."""
     manifest = load_manifest(config.manifest_path, config.data_dir)
@@ -240,11 +245,19 @@ def _build_dataloaders(
     else:
         raise ValueError(f"Unknown split_mode: {config.split_mode!r}")
 
+    use_plbert = vf_config.use_plbert if vf_config is not None else False
+    use_speaker = config.use_speaker_embedding
+    global_spk_path = vf_config.global_speaker_embedding_path if vf_config is not None else ""
+
     train_ds = VocaloFlowDataset(
         train_df, config.data_dir, config.max_seq_len, training=True,
+        use_plbert=use_plbert, use_speaker_embedding=use_speaker,
+        global_speaker_embedding_path=global_spk_path,
     )
     val_ds = VocaloFlowDataset(
         val_df, config.data_dir, config.max_seq_len, training=False,
+        use_plbert=use_plbert, use_speaker_embedding=use_speaker,
+        global_speaker_embedding_path=global_spk_path,
     )
     train_loader = DataLoader(
         train_ds, batch_size=config.batch_size, shuffle=True,
@@ -324,8 +337,17 @@ def _restore_state(
         return global_step, start_global_step
 
     # Fresh fine-tune run: initialise from pretrained VocaloFlow.
-    model.load_state_dict(pt_ckpt["model_state_dict"])
-    ema_model.load_state_dict(pt_ckpt["ema_model_state_dict"])
+    # Use strict=False to allow new modules (e.g. speaker_proj) that don't
+    # exist in the pretrained checkpoint.  Zero-init ensures they have no
+    # effect at step 0.
+    missing_g, unexpected_g = model.load_state_dict(pt_ckpt["model_state_dict"], strict=False)
+    missing_e, unexpected_e = ema_model.load_state_dict(pt_ckpt["ema_model_state_dict"], strict=False)
+    if unexpected_g:
+        print(f"[{timestamp()}] WARNING: unexpected keys in pretrained checkpoint: {unexpected_g}")
+    if missing_g:
+        print(f"[{timestamp()}] New generator keys (zero-init): {missing_g}")
+    if missing_e:
+        print(f"[{timestamp()}] New EMA keys (zero-init): {missing_e}")
     # Discriminator stays at random init (intentional — see plan §4.3).
     if not config.reset_gen_optimizer and "optimizer_state_dict" in pt_ckpt:
         # Spec path: load pretrained Adam moments.  Not recommended — see
@@ -413,6 +435,8 @@ def _dit_discriminator_step(
     config: FinetuneConfig,
     device: torch.device,
     ft_step: int = 0,
+    plbert_features: torch.Tensor | None = None,
+    speaker_embedding: torch.Tensor | None = None,
 ) -> tuple[float, float, float]:
     """One discriminator optimizer step on full mel sequences.
 
@@ -420,15 +444,23 @@ def _dit_discriminator_step(
     """
     x_1_d = x_1
     x_1_hat_d = x_1_hat.detach()
+    plbert_d = plbert_features
     if config.enable_disc_augmentation:
         rng = torch.Generator(device="cpu")
         rng.manual_seed(ft_step * 2)
         x_1_d = augment_mel(x_1, config, rng)
         rng.manual_seed(ft_step * 2)
         x_1_hat_d = augment_mel(x_1_hat.detach(), config, rng)
+        if plbert_features is not None:
+            rng.manual_seed(ft_step * 2)
+            plbert_d = augment_mel(plbert_features, config, rng)
 
-    real_scores, _ = discriminator(x_1_d, padding_mask)
-    fake_scores, _ = discriminator(x_1_hat_d, padding_mask)
+    real_scores, _ = discriminator(x_1_d, padding_mask,
+                                   speaker_embedding=speaker_embedding,
+                                   plbert_features=plbert_d)
+    fake_scores, _ = discriminator(x_1_hat_d, padding_mask,
+                                   speaker_embedding=speaker_embedding,
+                                   plbert_features=plbert_d)
     d_loss = hinge_d_loss(real_scores, fake_scores)
 
     if config.logit_center_weight > 0:
@@ -453,22 +485,32 @@ def _dit_generator_adv_losses(
     eff_lambda_fm: float,
     device: torch.device,
     ft_step: int = 0,
+    plbert_features: torch.Tensor | None = None,
+    speaker_embedding: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Adversarial + feature-matching losses on full mel sequences."""
     x_1_g = x_1
     x_1_hat_g = x_1_hat
+    plbert_g = plbert_features
     if config.enable_disc_augmentation:
         rng = torch.Generator(device="cpu")
         rng.manual_seed(ft_step * 2 + 1)
         x_1_g = augment_mel(x_1, config, rng)
         rng.manual_seed(ft_step * 2 + 1)
         x_1_hat_g = augment_mel(x_1_hat, config, rng)
+        if plbert_features is not None:
+            rng.manual_seed(ft_step * 2 + 1)
+            plbert_g = augment_mel(plbert_features, config, rng)
 
-    fake_scores, fake_feats = discriminator(x_1_hat_g, padding_mask)
+    fake_scores, fake_feats = discriminator(x_1_hat_g, padding_mask,
+                                            speaker_embedding=speaker_embedding,
+                                            plbert_features=plbert_g)
     g_adv = hinge_g_loss(fake_scores)
     l_fm = torch.zeros((), device=device)
     if config.enable_feature_matching and eff_lambda_fm > 0:
-        _, real_feats = discriminator(x_1_g, padding_mask)
+        _, real_feats = discriminator(x_1_g, padding_mask,
+                                     speaker_embedding=speaker_embedding,
+                                     plbert_features=plbert_g)
         l_fm = feature_matching_loss(real_feats, fake_feats)
     return g_adv, l_fm
 
@@ -550,6 +592,9 @@ def _extra_d_steps(
             batch = next(d_batch_iter)
 
         x_0, x_1, f0, voicing, phoneme_ids, padding_mask = unpack_batch(batch, device)
+        optional = unpack_optional_features(batch, device)
+        plbert_features = optional.get("plbert_features")
+        speaker_embedding = optional.get("speaker_embedding")
 
         with torch.no_grad():
             x_1_hat = unroll_ode(
@@ -557,6 +602,8 @@ def _extra_d_steps(
                 num_steps=config.ode_num_steps,
                 method=config.ode_method,
                 grad_checkpoint=False,
+                plbert_features=plbert_features,
+                speaker_embedding=speaker_embedding,
             )
 
         if config.disc_type == "dit":
@@ -564,6 +611,8 @@ def _extra_d_steps(
                 x_1, x_1_hat, padding_mask,
                 discriminator, opt_d, config, device,
                 ft_step=ft_step + 1_000_000 * (extra_idx + 1),
+                plbert_features=plbert_features,
+                speaker_embedding=speaker_embedding,
             )
         else:
             crop_pairs = extract_random_crops(
@@ -603,6 +652,9 @@ def _training_step(
     Returns a dict of scalars suitable for TB/wandb logging.
     """
     x_0, x_1, f0, voicing, phoneme_ids, padding_mask = unpack_batch(batch, device)
+    optional = unpack_optional_features(batch, device)
+    plbert_features = optional.get("plbert_features")
+    speaker_embedding = optional.get("speaker_embedding")
 
     # Learning rates.  Generator is constant; disc has warmup + cosine.
     lr_g = config.gen_learning_rate
@@ -638,6 +690,8 @@ def _training_step(
     if config.enable_cfm:
         cfm_out = criterion(
             model, x_0, x_1, f0, voicing, phoneme_ids, padding_mask,
+            plbert_features=plbert_features,
+            speaker_embedding=speaker_embedding,
         )
         l_cfm = cfm_out["velocity"]
         eb_std_val = cfm_out["eb_std"].item()
@@ -658,6 +712,8 @@ def _training_step(
             num_steps=config.ode_num_steps,
             method=config.ode_method,
             grad_checkpoint=config.ode_grad_checkpoint,
+            plbert_features=plbert_features,
+            speaker_embedding=speaker_embedding,
         )
     else:
         x_1_hat = None
@@ -676,6 +732,8 @@ def _training_step(
                 x_1, x_1_hat, padding_mask,
                 discriminator, opt_d, config, device,
                 ft_step=ft_step,
+                plbert_features=plbert_features,
+                speaker_embedding=speaker_embedding,
             )
     else:
         # Patch discriminator: crop-based path
@@ -716,6 +774,8 @@ def _training_step(
                 x_1, x_1_hat, padding_mask,
                 discriminator, config, eff_lambda_fm, device,
                 ft_step=ft_step,
+                plbert_features=plbert_features,
+                speaker_embedding=speaker_embedding,
             )
         else:
             if crop_pairs:
@@ -842,6 +902,23 @@ def _training_step(
         "train/d_hf_real_mean": d_hf_real_mean,
         "train/d_hf_fake_mean": d_hf_fake_mean,
     }
+
+    # Projection layer gradient norms (speaker / PL-BERT conditioning)
+    for attr, key in [
+        ("speaker_proj", "train/gen_speaker_proj_grad_norm"),
+        ("plbert_proj", "train/gen_plbert_proj_grad_norm"),
+    ]:
+        mod = getattr(model, attr, None)
+        if mod is not None and hasattr(mod, "weight") and mod.weight.grad is not None:
+            metrics[key] = mod.weight.grad.norm().item()
+
+    for attr, key in [
+        ("speaker_proj", "train/disc_speaker_proj_grad_norm"),
+        ("plbert_proj", "train/disc_plbert_proj_grad_norm"),
+    ]:
+        mod = getattr(discriminator, attr, None)
+        if mod is not None and hasattr(mod, "weight") and mod.weight.grad is not None:
+            metrics[key] = mod.weight.grad.norm().item()
 
 
 def _ema_update(
@@ -998,7 +1075,15 @@ def train(config: FinetuneConfig) -> None:
     param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[{timestamp()}] VocaloFlow parameters: {param_count:,}")
 
-    train_loader, val_loader = _build_dataloaders(config)
+    train_loader, val_loader = _build_dataloaders(config, vf_config)
+
+    _probe = next(iter(train_loader))
+    validate_batch_signals(
+        _probe,
+        expect_plbert=vf_config.use_plbert,
+        expect_speaker_embedding=config.use_speaker_embedding,
+    )
+    del _probe
 
     if config.disc_type == "dit":
         discriminator = DiTDiscriminator(
@@ -1009,6 +1094,12 @@ def train(config: FinetuneConfig) -> None:
             ffn_dim=config.disc_dit_ffn_dim,
             max_len=vf_config.max_seq_len + 1,
             feature_block_indices=list(config.disc_dit_feature_blocks),
+            use_plbert_input=config.disc_use_plbert_input,
+            plbert_feature_dim=vf_config.plbert_feature_dim,
+            disc_plbert_proj_dim=config.disc_plbert_proj_dim,
+            use_speaker_input=config.disc_use_speaker_input,
+            speaker_embedding_dim=vf_config.speaker_embedding_dim,
+            disc_speaker_proj_dim=config.disc_speaker_proj_dim,
         ).to(device)
     else:
         discriminator = PatchDiscriminator(channels=list(config.disc_channels)).to(device)

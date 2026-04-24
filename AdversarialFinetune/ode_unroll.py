@@ -30,15 +30,21 @@ def _call_model(
     phoneme_ids: Tensor,
     padding_mask: Tensor | None,
     grad_checkpoint: bool,
+    plbert_features: Tensor | None = None,
+    speaker_embedding: Tensor | None = None,
 ) -> Tensor:
     """Single model forward, optionally wrapped in torch.utils.checkpoint."""
     if not grad_checkpoint:
-        return model(x_t, t, x_0, f0, voicing, phoneme_ids, padding_mask)
+        return model(x_t, t, x_0, f0, voicing, phoneme_ids, padding_mask,
+                     plbert_features=plbert_features,
+                     speaker_embedding=speaker_embedding)
 
-    # checkpoint requires a function taking only tensors; capture padding_mask
-    # in closure since it may be None.
+    # checkpoint requires a function taking only tensors; capture non-tensor
+    # args in closure.
     def _run(x_t_, t_, x_0_, f0_, voicing_, phoneme_ids_):
-        return model(x_t_, t_, x_0_, f0_, voicing_, phoneme_ids_, padding_mask)
+        return model(x_t_, t_, x_0_, f0_, voicing_, phoneme_ids_, padding_mask,
+                     plbert_features=plbert_features,
+                     speaker_embedding=speaker_embedding)
 
     return checkpoint(
         _run, x_t, t, x_0, f0, voicing, phoneme_ids, use_reentrant=False,
@@ -55,6 +61,8 @@ def unroll_ode(
     num_steps: int,
     method: str = "euler",
     grad_checkpoint: bool = False,
+    plbert_features: Tensor | None = None,
+    speaker_embedding: Tensor | None = None,
 ) -> Tensor:
     """Differentiable ODE integration from t=0 to t=1.
 
@@ -85,6 +93,8 @@ def unroll_ode(
             v = _call_model(
                 model, x_t, t, x_0, f0, voicing, phoneme_ids,
                 padding_mask, grad_checkpoint,
+                plbert_features=plbert_features,
+                speaker_embedding=speaker_embedding,
             )
             x_t = x_t + dt * v
 
@@ -92,12 +102,16 @@ def unroll_ode(
             v1 = _call_model(
                 model, x_t, t, x_0, f0, voicing, phoneme_ids,
                 padding_mask, grad_checkpoint,
+                plbert_features=plbert_features,
+                speaker_embedding=speaker_embedding,
             )
             x_mid = x_t + 0.5 * dt * v1
             t_mid = torch.full((B,), t_val + 0.5 * dt, device=device, dtype=x_0.dtype)
             v2 = _call_model(
                 model, x_mid, t_mid, x_0, f0, voicing, phoneme_ids,
                 padding_mask, grad_checkpoint,
+                plbert_features=plbert_features,
+                speaker_embedding=speaker_embedding,
             )
             x_t = x_t + dt * v2
 

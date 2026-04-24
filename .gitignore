@@ -8,6 +8,9 @@ API/UtauGenerate/assets/Singers/
 API/OpenUtau/**/bin/
 API/OpenUtau/**/obj/
 
+temp_data/
+
+
 # Build artifacts & caches
 __pycache__/
 *.pyc

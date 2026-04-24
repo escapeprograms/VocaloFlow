@@ -20,7 +20,7 @@ import torch.nn as nn
 from torch import Tensor
 from torch.utils.data import DataLoader
 
-from ft_utils import VOCALOFLOW_DIR, import_from_path, unpack_batch
+from ft_utils import VOCALOFLOW_DIR, import_from_path, unpack_batch, unpack_optional_features
 
 
 # ── Import sample_ode from VocaloFlow (no namespace collision) ────────────
@@ -151,6 +151,9 @@ def evaluate_inference(
             break
 
         x_0, x_1, f0, voicing, phoneme_ids, padding_mask = unpack_batch(batch, device)
+        optional = unpack_optional_features(batch, device)
+        plbert_features = optional.get("plbert_features")
+        speaker_embedding = optional.get("speaker_embedding")
         lengths = batch["length"].tolist() if "length" in batch else [x_0.shape[1]] * x_0.shape[0]
         B = x_0.shape[0]
 
@@ -158,11 +161,15 @@ def evaluate_inference(
             ema_model, x_0, f0, voicing, phoneme_ids,
             num_steps=32, method="midpoint",
             padding_mask=padding_mask, diagnostics=False, cfg_scale=1.0,
+            plbert_features=plbert_features,
+            speaker_embedding=speaker_embedding,
         )
         mel_4 = sample_ode(
             ema_model, x_0, f0, voicing, phoneme_ids,
             num_steps=4, method="euler",
             padding_mask=padding_mask, diagnostics=False, cfg_scale=1.0,
+            plbert_features=plbert_features,
+            speaker_embedding=speaker_embedding,
         )
 
         sum_32 += _masked_l1(mel_32, x_1, padding_mask) * B
@@ -219,12 +226,17 @@ def validate_recon_4step(
     n_items = 0
     for batch in val_loader:
         x_0, x_1, f0, voicing, phoneme_ids, padding_mask = unpack_batch(batch, device)
+        optional = unpack_optional_features(batch, device)
+        plbert_features = optional.get("plbert_features")
+        speaker_embedding = optional.get("speaker_embedding")
         B = x_0.shape[0]
 
         pred = sample_ode(
             ema_model, x_0, f0, voicing, phoneme_ids,
             num_steps=num_ode_steps, method=method,
             padding_mask=padding_mask, diagnostics=False, cfg_scale=1.0,
+            plbert_features=plbert_features,
+            speaker_embedding=speaker_embedding,
         )
         sum_l1 += _masked_l1(pred, x_1, padding_mask) * B
         n_items += B

@@ -121,6 +121,13 @@ class FinetuneConfig:
     hf_disc_learning_rate: float = 2.0e-4
     hf_disc_lr_warmup_steps: int = 1000
 
+    # -- Speaker embedding + conditioned discriminator (Exp 8) -----------
+    use_speaker_embedding: bool = False              # load speaker embeddings + enable generator conditioning
+    disc_use_plbert_input: bool = False               # concatenate PL-BERT features to disc mel input
+    disc_plbert_proj_dim: int = 128                   # discriminator PL-BERT projection dim
+    disc_use_speaker_input: bool = False              # concatenate speaker embedding to disc mel input
+    disc_speaker_proj_dim: int = 64                   # discriminator speaker embedding projection dim
+
     # -- Paths ------------------------------------------------------------
     run_name: str = ""
     checkpoint_dir: str = "./checkpoints"

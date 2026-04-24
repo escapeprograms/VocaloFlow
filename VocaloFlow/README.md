@@ -120,24 +120,24 @@ Test script:
 python -m inference.pipeline 
     --ustx "../demo/let_it_go/let_it_go.ustx" 
     --prior-wav "../demo/let_it_go/prior_let_it_go.wav" 
-    --checkpoint ../AdversarialFinetune/checkpoints/4-20-energy-ft/checkpoint_75000.pt
-    --output "../demo/let_it_go/4-20-energy-ft/75000/output.wav"
+    --checkpoint ../AdversarialFinetune/checkpoints/4-23-embed-ft/checkpoint_70000.pt
+    --output "../demo/let_it_go/4-23-embed-ft/70000/output.wav"
     --save-mels
     --num-ode-steps 4
 
 python -m inference.pipeline 
     --ustx "../demo/we_are_charlie/we_are_charlie.ustx" 
     --prior-wav "../demo/we_are_charlie/output_prior.wav" 
-    --checkpoint ../AdversarialFinetune/checkpoints/4-18-afm2/checkpoint_65000.pt
-    --output "../demo/we_are_charlie/4-18-afm2/output.wav"
+    --checkpoint ../AdversarialFinetune/checkpoints/4-23-embed-ft/checkpoint_80000.pt
+    --output "../demo/we_are_charlie/4-23-embed-ft/output.wav"
     --save-mels
     --num-ode-steps 4
 
 python -m inference.pipeline 
     --ustx "../demo/let_it_go/let_it_go.ustx" 
     --prior-wav "../demo/let_it_go/prior_let_it_go.wav" 
-    --checkpoint "checkpoints/4-19-pl-bert/checkpoint_55000.pt"
-    --output "../demo/let_it_go/4-19-pl-bert/55000/output.wav"
+    --checkpoint "checkpoints/4-23-embed/checkpoint_65000.pt"
+    --output "../demo/let_it_go/4-23-embed/65000/output.wav"
     --save-mels
 
 python -m inference.pipeline 
@@ -166,6 +166,7 @@ Key flags:
 - `--device auto|cuda|cpu` — Compute device (default auto)
 - `--chunk-size 256` — Frames per inference chunk (256 = 5.12s)
 - `--overlap 16` — Crossfade overlap frames between chunks
+- `--speaker-embedding PATH` — Speaker embedding .pt file (default: `SpeakerEmbedding/embeddings/Rachie/speaker_embedding.pt`; only used when checkpoint has `use_speaker_embedding=True`)
 
 Outputs:
 
@@ -189,7 +190,7 @@ End-to-end inference pipeline: USTX -> enhanced WAV.
 - `extract_or_load_f0(...)` — 3-tier fallback: provided .npy -> RMVPE extraction -> MIDI pitch synthesis
 - `build_phoneme_ids(notes, ms_per_tick, total_frames, phoneset_path)` — USTX lyrics -> `g2p_transform()` from SoulX-Singer -> `_build_mel2note()` -> `resolve_phoneme_indirection()` -> frame-level IDs
 - `load_model(checkpoint_path, device)` — Loads VocaloFlow from checkpoint, prefers EMA weights
-- `infer_chunked(model, prior_mel, f0, voicing, phoneme_ids, ...)` — Overlap-add ODE inference with linear crossfade
+- `infer_chunked(model, prior_mel, f0, voicing, phoneme_ids, ..., speaker_embedding=None)` — Overlap-add ODE inference with linear crossfade. `speaker_embedding` is a `(1, 192)` tensor broadcast to every chunk.
 - `mel_to_wav(mel)` — Vocodes output mel via SoulX-Singer Vocos
 
 ### External Dependencies (imported via importlib to avoid utils namespace collision)
@@ -215,6 +216,7 @@ Single dataclass holding all hyperparameters. Key values:
 - `hidden_dim=512`, `num_heads=8`, `ffn_dim=2048`, `num_dit_blocks=6`, `dropout=0.1`
 - `input_channels=385` (128+128+64+64+1)
 - `use_plbert=False`, `plbert_feature_dim=768`, `plbert_proj_dim=64` — PL-BERT integration (toggled off by default; when on, replaces learned `PhonemeEmbedding` with frozen PL-BERT features projected 768->64, keeping `input_channels=385` unchanged)
+- `use_speaker_embedding=False`, `speaker_embedding_dim=192`, `global_speaker_embedding_path=""` — ECAPA-TDNN speaker embedding (toggled off by default; when on, adds a zero-init Linear(192, 512) projection to the timestep conditioning `c`, no input_channels change). `global_speaker_embedding_path` points to a single `.pt` file shared across all chunks (recommended for single-speaker); leave empty to fall back to per-chunk `speaker_embedding.npy` files
 - `cfg_dropout_prob=0.2`, `cfg_scale=2.0`
 - `max_seq_len=256` — Covers p95 of sequence lengths
 - `batch_size=32`, `learning_rate=1e-4`, `total_steps=200_000`

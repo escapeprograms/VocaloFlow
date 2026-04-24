@@ -34,4 +34,27 @@ def vocaloflow_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, tor
         result["plbert_features"] = torch.stack(
             [item["plbert_features"] for item in batch]
         )
+    if "speaker_embedding" in batch[0]:
+        result["speaker_embedding"] = torch.stack(
+            [item["speaker_embedding"] for item in batch]
+        )
     return result
+
+
+def validate_batch_signals(
+    batch: Dict[str, torch.Tensor],
+    *,
+    expect_plbert: bool = False,
+    expect_speaker_embedding: bool = False,
+) -> None:
+    """Raise loudly if config-expected optional signals are missing from a batch."""
+    if expect_plbert and "plbert_features" not in batch:
+        raise RuntimeError(
+            "use_plbert=True but batch has no 'plbert_features'. "
+            "Check that plbert_features.npy exists in each chunk directory."
+        )
+    if expect_speaker_embedding and "speaker_embedding" not in batch:
+        raise RuntimeError(
+            "use_speaker_embedding=True but batch has no 'speaker_embedding'. "
+            "Check that global_speaker_embedding_path points to a valid .pt file."
+        )

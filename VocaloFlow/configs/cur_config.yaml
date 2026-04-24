@@ -11,3 +11,8 @@ phoneme_blur_enabled: false
 phoneme_blend_fraction: 0.2
 
 use_plbert: true
+
+# Generator speaker embedding
+use_speaker_embedding: true
+speaker_embedding_dim: 192
+global_speaker_embedding_path: "../SpeakerEmbedding/embeddings/Rachie/speaker_embedding.pt"

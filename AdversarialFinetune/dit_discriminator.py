@@ -144,13 +144,39 @@ class DiTDiscriminator(nn.Module):
         max_len: int = 512,
         dropout: float = 0.0,
         feature_block_indices: list[int] | None = None,
+        use_plbert_input: bool = False,
+        plbert_feature_dim: int = 768,
+        disc_plbert_proj_dim: int = 128,
+        use_speaker_input: bool = False,
+        speaker_embedding_dim: int = 192,
+        disc_speaker_proj_dim: int = 64,
     ) -> None:
         super().__init__()
         if feature_block_indices is None:
             feature_block_indices = [1, 3]
         self.feature_block_indices = set(feature_block_indices)
+        self.use_plbert_input = use_plbert_input
+        self.use_speaker_input = use_speaker_input
 
-        self.input_proj = nn.Linear(mel_dim, hidden_dim)
+        # PL-BERT projection (zero-init so disc starts from mel-only behavior)
+        if use_plbert_input:
+            self.plbert_proj = nn.Linear(plbert_feature_dim, disc_plbert_proj_dim)
+            nn.init.zeros_(self.plbert_proj.weight)
+            nn.init.zeros_(self.plbert_proj.bias)
+
+        # Speaker embedding projection (zero-init)
+        if use_speaker_input:
+            self.speaker_proj = nn.Linear(speaker_embedding_dim, disc_speaker_proj_dim)
+            nn.init.zeros_(self.speaker_proj.weight)
+            nn.init.zeros_(self.speaker_proj.bias)
+
+        effective_mel_dim = mel_dim
+        if use_plbert_input:
+            effective_mel_dim += disc_plbert_proj_dim
+        if use_speaker_input:
+            effective_mel_dim += disc_speaker_proj_dim
+        self.input_proj = nn.Linear(effective_mel_dim, hidden_dim)
+
         self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
         nn.init.normal_(self.cls_token, std=0.02)
 
@@ -163,13 +189,19 @@ class DiTDiscriminator(nn.Module):
         self.output_head = nn.Linear(hidden_dim, 1)
 
     def forward(
-        self, mel: Tensor, padding_mask: Tensor | None = None,
+        self,
+        mel: Tensor,
+        padding_mask: Tensor | None = None,
+        speaker_embedding: Tensor | None = None,
+        plbert_features: Tensor | None = None,
     ) -> tuple[Tensor, list[Tensor]]:
         """Classify mel sequences as real or fake.
 
         Args:
             mel: (B, T, mel_dim) mel-spectrogram sequence.
             padding_mask: (B, T) bool, True = valid frame.
+            speaker_embedding: (B, D_spk) speaker embedding (optional).
+            plbert_features: (B, T, 768) PL-BERT features (optional).
 
         Returns:
             logits: (B, 1) per-sample real/fake score.
@@ -177,8 +209,23 @@ class DiTDiscriminator(nn.Module):
                 states) at ``feature_block_indices``, each (B, T+1, hidden_dim).
         """
         B, T, _ = mel.shape
+        cat_list = [mel]
 
-        h = self.input_proj(mel)  # (B, T, D)
+        if self.use_plbert_input:
+            if plbert_features is not None:
+                cat_list.append(self.plbert_proj(plbert_features))
+            else:
+                cat_list.append(mel.new_zeros(B, T, self.plbert_proj.out_features))
+
+        if self.use_speaker_input:
+            if speaker_embedding is not None:
+                spk = self.speaker_proj(speaker_embedding)
+                spk = spk.unsqueeze(1).expand(-1, T, -1)
+            else:
+                spk = mel.new_zeros(B, T, self.speaker_proj.out_features)
+            cat_list.append(spk)
+
+        h = self.input_proj(torch.cat(cat_list, dim=-1))  # (B, T, D)
 
         # Prepend [CLS] token
         cls = self.cls_token.expand(B, -1, -1)  # (B, 1, D)

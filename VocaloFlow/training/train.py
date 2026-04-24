@@ -23,7 +23,7 @@ from training.stft_loss import MultiResolutionSTFTLoss
 from training.lr_schedule import get_lr
 from utils.data_helpers import load_manifest, filter_manifest, split_by_song, split_random
 from utils.dataset import VocaloFlowDataset
-from utils.collate import vocaloflow_collate_fn
+from utils.collate import vocaloflow_collate_fn, validate_batch_signals
 
 
 def train(config: VocaloFlowConfig) -> None:
@@ -95,10 +95,18 @@ def train(config: VocaloFlowConfig) -> None:
     else:
         raise ValueError(f"Unknown split_mode: {config.split_mode!r} (expected 'song' or 'random')")
 
-    train_ds = VocaloFlowDataset(train_df, config.data_dir, config.max_seq_len,
-                                 training=True, use_plbert=config.use_plbert)
-    val_ds = VocaloFlowDataset(val_df, config.data_dir, config.max_seq_len,
-                               training=False, use_plbert=config.use_plbert)
+    train_ds = VocaloFlowDataset(
+        train_df, config.data_dir, config.max_seq_len, training=True,
+        use_plbert=config.use_plbert,
+        use_speaker_embedding=config.use_speaker_embedding,
+        global_speaker_embedding_path=config.global_speaker_embedding_path,
+    )
+    val_ds = VocaloFlowDataset(
+        val_df, config.data_dir, config.max_seq_len, training=False,
+        use_plbert=config.use_plbert,
+        use_speaker_embedding=config.use_speaker_embedding,
+        global_speaker_embedding_path=config.global_speaker_embedding_path,
+    )
 
     train_loader = DataLoader(
         train_ds, batch_size=config.batch_size, shuffle=True,
@@ -109,6 +117,15 @@ def train(config: VocaloFlowConfig) -> None:
         val_ds, batch_size=config.batch_size, shuffle=False,
         num_workers=4, pin_memory=True, collate_fn=vocaloflow_collate_fn,
     )
+
+    # ── Validate that config-expected signals are present in data ────────
+    _probe = next(iter(train_loader))
+    validate_batch_signals(
+        _probe,
+        expect_plbert=config.use_plbert,
+        expect_speaker_embedding=config.use_speaker_embedding,
+    )
+    del _probe
 
     # ── Model ─────────────────────────────────────────────────────────────
     model = VocaloFlow(config).to(device)
@@ -179,6 +196,9 @@ def train(config: VocaloFlowConfig) -> None:
             plbert_features = batch.get("plbert_features")
             if plbert_features is not None:
                 plbert_features = plbert_features.to(device)
+            speaker_embedding = batch.get("speaker_embedding")
+            if speaker_embedding is not None:
+                speaker_embedding = speaker_embedding.to(device)
 
             # Update learning rate
             lr = get_lr(global_step, config.warmup_steps, config.total_steps, config.learning_rate)
@@ -187,7 +207,8 @@ def train(config: VocaloFlowConfig) -> None:
 
             # Forward + backward
             losses = criterion(model, x_0, x_1, f0, voicing, phoneme_ids, padding_mask,
-                               plbert_features=plbert_features)
+                               plbert_features=plbert_features,
+                               speaker_embedding=speaker_embedding)
             loss = losses["total"]
 
             optimizer.zero_grad()
@@ -301,9 +322,13 @@ def validate(
             plbert_features = batch.get("plbert_features")
             if plbert_features is not None:
                 plbert_features = plbert_features.to(device)
+            speaker_embedding = batch.get("speaker_embedding")
+            if speaker_embedding is not None:
+                speaker_embedding = speaker_embedding.to(device)
 
             losses = criterion(model, x_0, x_1, f0, voicing, phoneme_ids, padding_mask,
-                               plbert_features=plbert_features)
+                               plbert_features=plbert_features,
+                               speaker_embedding=speaker_embedding)
             for k in sums:
                 sums[k] += losses[k].item()
             n_batches += 1

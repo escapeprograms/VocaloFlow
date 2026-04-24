@@ -57,6 +57,7 @@ class FlowMatchingLoss(nn.Module):
         phoneme_ids: Tensor,
         padding_mask: Tensor | None = None,
         plbert_features: Tensor | None = None,
+        speaker_embedding: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """Compute the flow matching loss (+ optional STFT aux) for one batch.
 
@@ -69,6 +70,7 @@ class FlowMatchingLoss(nn.Module):
             phoneme_ids: (B, T) resolved phoneme token IDs.
             padding_mask: (B, T) bool, True = valid frame.
             plbert_features: (B, T, 768) frozen PL-BERT embeddings (optional).
+            speaker_embedding: (B, 192) speaker embedding (optional, NOT dropped by CFG).
 
         Returns:
             Dict with scalar tensors: {"total", "velocity", "stft"}.
@@ -103,7 +105,8 @@ class FlowMatchingLoss(nn.Module):
 
         # Predict velocity
         v_pred = model(x_t, t, x_0, f0, voicing, phoneme_ids, padding_mask,
-                       plbert_features=plbert_features)
+                       plbert_features=plbert_features,
+                       speaker_embedding=speaker_embedding)
 
         # Velocity MSE, optionally energy-balanced, masked for padding
         diff = (v_pred - v_target) ** 2  # (B, T, 128)

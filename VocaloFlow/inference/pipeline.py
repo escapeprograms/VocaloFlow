@@ -98,6 +98,9 @@ SR = 24000
 HOP = 480
 
 _PLBERT_DIR = os.path.join(_REPO_ROOT, "PL-BERT")
+_DEFAULT_SPEAKER_EMB = os.path.join(
+    _REPO_ROOT, "SpeakerEmbedding", "embeddings", "Rachie", "speaker_embedding.pt"
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -481,6 +484,7 @@ def infer_chunked(
     device: torch.device = torch.device("cpu"),
     cfg_scale: float = 1.0,
     plbert_features: np.ndarray | None = None,
+    speaker_embedding: torch.Tensor | None = None,
 ) -> np.ndarray:
     """Run chunked ODE inference with overlap-add blending.
 
@@ -539,7 +543,8 @@ def infer_chunked(
                 if pl is not None else None)
 
         pred = sample_ode(model, pm_t, f_t, v_t, ph_t, num_steps, method, mask,
-                          cfg_scale=cfg_scale, plbert_features=pl_t)
+                          cfg_scale=cfg_scale, plbert_features=pl_t,
+                          speaker_embedding=speaker_embedding)
         pred = pred[0, :length].cpu().numpy()
 
         # Blending window: fade in at left overlap, fade out at right overlap
@@ -618,6 +623,8 @@ def parse_args() -> argparse.Namespace:
                    help="Save prior and output mel spectrograms as .npy alongside output WAV")
     p.add_argument("--plbert-dir", default=os.path.join(_REPO_ROOT, "PL-BERT"),
                    help="Path to PL-BERT directory (config, checkpoint, etc.)")
+    p.add_argument("--speaker-embedding", default=_DEFAULT_SPEAKER_EMB,
+                   help="Path to speaker embedding .pt file (default: Rachie)")
     return p.parse_args()
 
 
@@ -705,6 +712,16 @@ def main():
             args.phoneset, plbert_dir=args.plbert_dir, device=str(device),
         )
 
+    # Step 7c: Speaker embedding (if model uses it)
+    speaker_embedding = None
+    if model.config.use_speaker_embedding:
+        spk_path = args.speaker_embedding
+        if spk_path and os.path.exists(spk_path):
+            speaker_embedding = torch.load(spk_path, weights_only=True).float().unsqueeze(0).to(device)
+            print(f"[pipeline] Loaded speaker embedding from {spk_path}: {speaker_embedding.shape}")
+        else:
+            print(f"[pipeline] WARNING: use_speaker_embedding=True but no embedding found at {spk_path}")
+
     # Step 8: Chunked inference
     output_mel = infer_chunked(
         model, prior_mel, f0, voicing, phoneme_ids,
@@ -712,6 +729,7 @@ def main():
         num_steps=args.num_ode_steps, method=args.ode_method,
         device=device, cfg_scale=args.cfg_scale,
         plbert_features=plbert_features,
+        speaker_embedding=speaker_embedding,
     )
 
     # ── Diagnostic: output mel vs prior mel ──

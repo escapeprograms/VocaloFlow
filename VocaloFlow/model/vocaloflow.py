@@ -49,6 +49,13 @@ class VocaloFlow(nn.Module):
         if config.use_plbert:
             self.plbert_proj = nn.Linear(config.plbert_feature_dim, config.plbert_proj_dim)
 
+        # Speaker embedding conditioning (added to timestep vector c)
+        self.use_speaker_embedding = config.use_speaker_embedding
+        if config.use_speaker_embedding:
+            self.speaker_proj = nn.Linear(config.speaker_embedding_dim, config.hidden_dim)
+            nn.init.zeros_(self.speaker_proj.weight)
+            nn.init.zeros_(self.speaker_proj.bias)
+
         if config.phoneme_blur_enabled:
             self.phoneme_embed = BlurredPhonemeEmbedding(
                 vocab_size=config.phoneme_vocab_size,
@@ -127,18 +134,20 @@ class VocaloFlow(nn.Module):
         phoneme_ids: Tensor,
         padding_mask: Tensor | None = None,
         plbert_features: Tensor | None = None,
+        speaker_embedding: Tensor | None = None,
     ) -> Tensor:
         """Predict the velocity field v_theta.
 
         Args:
-            x_t:             (B, T, 128) interpolated mel state.
-            t:               (B,) flow timestep in [0, 1].
-            prior_mel:       (B, T, 128) Vocaloid prior mel (x_0 conditioning).
-            f0:              (B, T) F0 contour (0 for unvoiced).
-            voicing:         (B, T) voiced/unvoiced binary flag.
-            phoneme_ids:     (B, T) resolved phoneme token IDs.
-            padding_mask:    (B, T) bool, True = valid frame.
-            plbert_features: (B, T, 768) frozen PL-BERT embeddings (optional).
+            x_t:               (B, T, 128) interpolated mel state.
+            t:                 (B,) flow timestep in [0, 1].
+            prior_mel:         (B, T, 128) Vocaloid prior mel (x_0 conditioning).
+            f0:                (B, T) F0 contour (0 for unvoiced).
+            voicing:           (B, T) voiced/unvoiced binary flag.
+            phoneme_ids:       (B, T) resolved phoneme token IDs.
+            padding_mask:      (B, T) bool, True = valid frame.
+            plbert_features:   (B, T, 768) frozen PL-BERT embeddings (optional).
+            speaker_embedding: (B, 192) ECAPA-TDNN speaker embedding (optional).
 
         Returns:
             (B, T, 128) predicted velocity vector.
@@ -173,6 +182,10 @@ class VocaloFlow(nn.Module):
         # 6. Timestep conditioning: (B,) -> (B, 512)
         # Computed before the pre-processors so the WaveNet stack can consume it.
         c = self.timestep_mlp(t)
+
+        # 6b. Speaker embedding conditioning (additive, zero-init preserves pretrained behavior)
+        if self.use_speaker_embedding and speaker_embedding is not None:
+            c = c + self.speaker_proj(speaker_embedding)
 
         # 7a. ConvNeXt pre-processing (optional, no timestep conditioning)
         if self.convnext_stack is not None:
