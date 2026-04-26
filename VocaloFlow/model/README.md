@@ -7,23 +7,26 @@ Neural network architecture for the VocaloFlow conditional flow matching model (
 ### `VocaloFlow(config: VocaloFlowConfig)`
 Top-level nn.Module. Orchestrates all sub-components. Baseline (no pre-processing) ~26M params. Adding ConvNeXt adds ~8.4M. Adding WaveNet (8 blocks, skip=512) adds ~21.7M.
 
-**Forward signature**: `forward(x_t, t, prior_mel, f0, voicing, phoneme_ids, padding_mask=None, plbert_features=None) -> Tensor`
-- Inputs: x_t (B,T,128), t (B,), prior_mel (B,T,128), f0 (B,T), voicing (B,T), phoneme_ids (B,T) int64, padding_mask (B,T) bool, plbert_features (B,T,768) float optional
+**Forward signature**: `forward(x_t, t, prior_mel, f0, voicing, phoneme_ids, padding_mask=None, plbert_features=None, speaker_embedding=None) -> Tensor`
+- Inputs: x_t (B,T,128), t (B,), prior_mel (B,T,128), f0 (B,T), voicing (B,T), phoneme_ids (B,T) int64, padding_mask (B,T) bool, plbert_features (B,T,768) float optional, speaker_embedding (B,192) float optional
 - Output: (B,T,128) predicted velocity vector
 
-**Constructor**: Selects `BlurredPhonemeEmbedding` or `PhonemeEmbedding` based on `config.phoneme_blur_enabled`. Creates `ConvNeXtStack` if `config.num_convnext_blocks > 0` else `None`. Creates `WaveNetStack` if `config.num_wavenet_blocks > 0` else `None`. Both pre-processors can independently toggle on or off; if both are on, ConvNeXt runs first. If `config.use_plbert`, creates `plbert_proj = Linear(768, 64)` to project frozen PL-BERT features down to the same dim as the learned phoneme embedding.
+**Constructor**: Selects `BlurredPhonemeEmbedding` or `PhonemeEmbedding` based on `config.phoneme_blur_enabled`. Creates `ConvNeXtStack` if `config.num_convnext_blocks > 0` else `None`. Creates `WaveNetStack` if `config.num_wavenet_blocks > 0` else `None`. Both pre-processors can independently toggle on or off; if both are on, ConvNeXt runs first. If `config.use_plbert`, creates `plbert_proj = Linear(768, 64)`. If `config.use_speaker_embedding`, creates `speaker_proj = Linear(192, 512)` with zero-init. If `config.voicing_embed_dim > 1`, creates `VoicingEmbedding(dim)` + `LayerNorm(dim)`.
+
+**Input dimension**: Computed dynamically as `mel_channels*2 + f0_embed_dim + phoneme_embed_dim + voicing_embed_dim`. Default with voicing_embed_dim=1: 385. With voicing_embed_dim=32: 416.
 
 **Forward flow**:
-1. Phoneme conditioning: if `use_plbert` and `plbert_features` is provided, `plbert_proj(plbert_features)` → (B,T,64); otherwise `phoneme_embed(phoneme_ids)` → (B,T,64) — hard or blurred depending on config. Either path produces (B,T,64) `ph_emb`, so everything downstream is unchanged.
+1. Phoneme conditioning: if `use_plbert` and `plbert_features` is provided, `plbert_proj(plbert_features)` → (B,T,64); otherwise `phoneme_embed(phoneme_ids)` → (B,T,64).
 2. `f0_embed(f0)` → (B,T,64) via learned MLP
-3. Per-stream LayerNorm on x_t (128), prior_mel (128), f0_emb (64), ph_emb (64). vuv (1) passed raw.
-4. Concatenate all → (B,T,385)
-5. `input_proj` Linear(385,512) → (B,T,512)
-6. `timestep_mlp(t)` → (B,512) conditioning vector `c` (computed before pre-processors so WaveNet can consume it)
-7a. `convnext_stack(h)` → (B,T,512) — optional local temporal features (skipped if None)
-7b. `h = h + wavenet_stack(h, c)` — optional timestep-conditioned WaveNet residuals with outer skip (skipped if None)
-8. 6x `DiTBlock(h, c, mask)` → (B,T,512)
-9. `output_norm` + `output_proj` Linear(512,128) → (B,T,128)
+3. Per-stream LayerNorm on x_t (128), prior_mel (128), f0_emb (64), ph_emb (64).
+4. Voicing: if `voicing_embed_dim > 1`, `norm_voicing(voicing_embed(voicing))` → (B,T,voicing_embed_dim); else raw `voicing.unsqueeze(-1)` → (B,T,1).
+5. Concatenate all → (B,T, input_dim)
+6. `input_proj` Linear(input_dim, 512) → (B,T,512)
+7. `timestep_mlp(t)` → (B,512) conditioning vector `c`. If `use_speaker_embedding`, `c += speaker_proj(speaker_embedding)`.
+8a. `convnext_stack(h)` → optional local temporal features (skipped if None)
+8b. `h = h + wavenet_stack(h, c)` — optional timestep-conditioned WaveNet residuals (skipped if None)
+9. Nx `DiTBlock(h, c, mask)` → (B,T,512) (N = `config.num_dit_blocks`)
+10. `output_norm` + `output_proj` Linear(512,128) → (B,T,128)
 
 ## dit_block.py
 
@@ -51,6 +54,9 @@ Sinusoidal(256) → Linear(256,512) → SiLU → Linear(512,512). Maps scalar ti
 
 ### `F0Embedding(embed_dim=64)`
 Learned MLP for continuous F0 values: Linear(1,64) → SiLU → Linear(64,64). Maps (B,T) Hz values to (B,T,64) dense embeddings. Provides a richer pitch representation than a single raw channel.
+
+### `VoicingEmbedding(embed_dim=32)`
+Learned embedding for binary voiced/unvoiced flag. `nn.Embedding(2, embed_dim)` lookup table. Casts float voicing input to long for the lookup. When `config.voicing_embed_dim > 1`, this replaces the raw 1-dim scalar voicing input. Gets its own `LayerNorm` in the model, following the per-stream normalization pattern. When `voicing_embed_dim == 1` (default), this class is not instantiated and voicing is passed as `voicing.unsqueeze(-1)`.
 
 ### `PhonemeEmbedding(vocab_size=2820, embed_dim=64)`
 Base class. `nn.Embedding` lookup table with `padding_idx=0` (PAD token). Maps (B,T) int64 → (B,T,64). Reduced from 256 to 64 so phoneme identity doesn't dominate the input over the prior mel signal.

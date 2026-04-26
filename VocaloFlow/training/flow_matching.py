@@ -4,6 +4,20 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
+from training.energy_balance import EnergyBalancedWeight
+
+
+def _masked_mse(diff: Tensor, mask: Tensor | None) -> Tensor:
+    """Mean of per-element squared errors, respecting an optional padding mask.
+
+    Args:
+        diff: (B, T, M) squared error tensor.
+        mask: (B, T, 1) float mask (1 = valid, 0 = pad), or None for all-valid.
+    """
+    if mask is not None:
+        return (diff * mask).sum() / (mask.sum() * diff.shape[-1])
+    return diff.mean()
+
 
 class FlowMatchingLoss(nn.Module):
     """OT-CFM training objective for VocaloFlow.
@@ -11,23 +25,27 @@ class FlowMatchingLoss(nn.Module):
     Interpolation path:  x_t = (1 - (1-sigma)*t) * x_0  +  t * x_1
     Target velocity:     v   = x_1  -  (1-sigma) * x_0
 
-    Velocity MSE = E_t[ || v_theta(x_t, t, cond) - v ||^2 ],  masked for padding.
+    Loss components:
+      - velocity_mse: standard MSE on the predicted velocity (always computed,
+        comparable across experiments regardless of EB/STFT settings).
+      - velocity_eb: energy-balanced reweighting of velocity MSE. Upweights
+        low-energy spectral regions. Only differs from velocity_mse when
+        energy_balance is enabled and the criterion is in training mode.
+      - stft: optional multi-resolution STFT loss on the one-step output
+        estimate x_1_hat = x_t.detach() + (1 - t) * v_pred.
 
-    Optional auxiliary: multi-resolution STFT loss on the one-step output estimate
-    x_1_hat = x_t.detach() + (1 - t) * v_pred, summed as
-        total = velocity + stft_lambda * stft.
+    Total loss (used for optimization):
+        total = velocity_eb + stft_lambda * stft
 
-    Returns a dict {total, velocity, stft} so both components can be logged.
-
-    Supports classifier-free guidance (CFG) dropout: during training,
-    conditioning signals (f0, voicing, phoneme_ids) are randomly replaced
-    with zeros to train the unconditional path.
+    Returns a dict {total, velocity_mse, velocity_eb, stft, eb_std}.
 
     Args:
         sigma_min: Small noise floor for numerical stability (default 1e-4).
-        cfg_dropout_prob: Probability of dropping conditioning per sample (default 0.0).
-        stft_loss: Optional MultiResolutionSTFTLoss module. When None, STFT term is skipped.
+        cfg_dropout_prob: Probability of dropping conditioning per sample.
+        stft_loss: Optional MultiResolutionSTFTLoss module.
         stft_lambda: Weight applied to the STFT loss in the total.
+        energy_balance: Optional EnergyBalancedWeight instance.
+        energy_balance_lambda: Interpolation between uniform (0) and full EB (1).
     """
 
     def __init__(
@@ -36,7 +54,7 @@ class FlowMatchingLoss(nn.Module):
         cfg_dropout_prob: float = 0.0,
         stft_loss: nn.Module | None = None,
         stft_lambda: float = 0.0,
-        energy_balance: object | None = None,
+        energy_balance: EnergyBalancedWeight | None = None,
         energy_balance_lambda: float = 0.4,
     ) -> None:
         super().__init__()
@@ -59,7 +77,7 @@ class FlowMatchingLoss(nn.Module):
         plbert_features: Tensor | None = None,
         speaker_embedding: Tensor | None = None,
     ) -> dict[str, Tensor]:
-        """Compute the flow matching loss (+ optional STFT aux) for one batch.
+        """Compute the flow matching loss for one batch.
 
         Args:
             model: VocaloFlow model.
@@ -73,7 +91,12 @@ class FlowMatchingLoss(nn.Module):
             speaker_embedding: (B, 192) speaker embedding (optional, NOT dropped by CFG).
 
         Returns:
-            Dict with scalar tensors: {"total", "velocity", "stft"}.
+            Dict with scalar tensors:
+              total         — loss used for optimization (velocity_eb + stft_lambda * stft)
+              velocity_mse  — unweighted velocity MSE (for cross-experiment comparison)
+              velocity_eb   — energy-balanced velocity MSE (equals velocity_mse when EB is off)
+              stft          — STFT auxiliary loss (0 when disabled)
+              eb_std        — std of EB weights over valid elements (diagnostic, 0 when EB is off)
         """
         B = x_0.shape[0]
         device = x_0.device
@@ -108,27 +131,24 @@ class FlowMatchingLoss(nn.Module):
                        plbert_features=plbert_features,
                        speaker_embedding=speaker_embedding)
 
-        # Velocity MSE, optionally energy-balanced, masked for padding
+        # ── Velocity losses ──────────────────────────────────────────────────
         diff = (v_pred - v_target) ** 2  # (B, T, 128)
+        mask = padding_mask.unsqueeze(-1).float() if padding_mask is not None else None
 
+        # Unweighted MSE (always computed — the cross-experiment baseline metric)
+        velocity_mse = _masked_mse(diff, mask)
+
+        # Energy-balanced MSE (reweighted to upweight quiet spectral regions)
         if self.training and self.energy_balance is not None:
             eb_weights = self.energy_balance(x_1, padding_mask)  # (B, T, 128)
             blend = (1.0 - self.energy_balance_lambda) + self.energy_balance_lambda * eb_weights
-            diff = diff * blend
-
-        if padding_mask is not None:
-            mask = padding_mask.unsqueeze(-1).float()
-            velocity = (diff * mask).sum() / (mask.sum() * diff.shape[-1])
-        else:
-            velocity = diff.mean()
-
-        # EB diagnostic for logging
-        if self.training and self.energy_balance is not None:
+            velocity_eb = _masked_mse(diff * blend, mask)
             eb_std = eb_weights[padding_mask].std() if padding_mask is not None else eb_weights.std()
         else:
-            eb_std = torch.zeros((), device=device, dtype=velocity.dtype)
+            velocity_eb = velocity_mse
+            eb_std = torch.zeros((), device=device, dtype=velocity_mse.dtype)
 
-        # Optional STFT aux loss on one-step output estimate.
+        # ── STFT auxiliary loss ──────────────────────────────────────────────
         # x_t.detach() is essential: v_pred already carries the parameter gradient;
         # letting grad flow back through x_t would add a redundant path via the
         # (frozen) data tensors x_0/x_1.
@@ -136,7 +156,13 @@ class FlowMatchingLoss(nn.Module):
             x_1_hat = x_t.detach() + (1.0 - t_expand) * v_pred
             stft = self.stft_loss(x_1_hat, x_1, padding_mask)
         else:
-            stft = torch.zeros((), device=device, dtype=velocity.dtype)
+            stft = torch.zeros((), device=device, dtype=velocity_mse.dtype)
 
-        total = velocity + self.stft_lambda * stft
-        return {"total": total, "velocity": velocity, "stft": stft, "eb_std": eb_std}
+        total = velocity_eb + self.stft_lambda * stft
+        return {
+            "total": total,
+            "velocity_mse": velocity_mse,
+            "velocity_eb": velocity_eb,
+            "stft": stft,
+            "eb_std": eb_std,
+        }

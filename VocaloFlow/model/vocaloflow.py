@@ -13,7 +13,7 @@ from configs.default import VocaloFlowConfig
 from model.dit_block import DiTBlock
 from model.convnext import ConvNeXtStack
 from model.wavenet import WaveNetStack
-from model.embeddings import TimestepMLP, PhonemeEmbedding, BlurredPhonemeEmbedding, F0Embedding
+from model.embeddings import TimestepMLP, PhonemeEmbedding, BlurredPhonemeEmbedding, F0Embedding, VoicingEmbedding
 
 
 class VocaloFlow(nn.Module):
@@ -71,14 +71,21 @@ class VocaloFlow(nn.Module):
         # Learned F0 embedding
         self.f0_embed = F0Embedding(embed_dim=config.f0_embed_dim)
 
+        # Voicing embedding: learned lookup or raw scalar
+        self.voicing_embed_dim = config.voicing_embed_dim
+        if config.voicing_embed_dim > 1:
+            self.voicing_embed = VoicingEmbedding(embed_dim=config.voicing_embed_dim)
+            self.norm_voicing = nn.LayerNorm(config.voicing_embed_dim)
+
         # Per-stream normalization (before concatenation)
         self.norm_xt = nn.LayerNorm(config.mel_channels)
         self.norm_prior = nn.LayerNorm(config.mel_channels)
         self.norm_f0 = nn.LayerNorm(config.f0_embed_dim)
         self.norm_ph = nn.LayerNorm(config.phoneme_embed_dim)
 
-        # Input projection: 385 -> 512
-        self.input_proj = nn.Linear(config.input_channels, config.hidden_dim)
+        # Input projection
+        input_dim = config.mel_channels * 2 + config.f0_embed_dim + config.phoneme_embed_dim + config.voicing_embed_dim
+        self.input_proj = nn.Linear(input_dim, config.hidden_dim)
 
         # ConvNeXt pre-processing blocks (local temporal feature extraction)
         if config.num_convnext_blocks > 0:
@@ -167,39 +174,44 @@ class VocaloFlow(nn.Module):
         f0_normed = self.norm_f0(f0_emb)
         ph_normed = self.norm_ph(ph_emb)
 
-        # 4. Concatenate all inputs: (B, T, 385)
+        # 4. Voicing: learned embedding or raw scalar
+        if self.voicing_embed_dim > 1:
+            voicing_emb = self.norm_voicing(self.voicing_embed(voicing))
+        else:
+            voicing_emb = voicing.unsqueeze(-1)
+
+        # 5. Concatenate all inputs
         cond = torch.cat([
             x_t_normed,                         # (B, T, 128)
             prior_normed,                        # (B, T, 128)
             f0_normed,                           # (B, T, 64)
             ph_normed,                           # (B, T, 64)
-            voicing.unsqueeze(-1),               # (B, T, 1)
+            voicing_emb,                         # (B, T, voicing_embed_dim)
         ], dim=-1)
 
-        # 5. Input projection: (B, T, 385) -> (B, T, 512)
+        # 6. Input projection
         h = self.input_proj(cond)
 
-        # 6. Timestep conditioning: (B,) -> (B, 512)
-        # Computed before the pre-processors so the WaveNet stack can consume it.
+        # 7. Timestep conditioning: (B,) -> (B, 512)
         c = self.timestep_mlp(t)
 
-        # 6b. Speaker embedding conditioning (additive, zero-init preserves pretrained behavior)
+        # 7b. Speaker embedding conditioning (additive, zero-init preserves pretrained behavior)
         if self.use_speaker_embedding and speaker_embedding is not None:
             c = c + self.speaker_proj(speaker_embedding)
 
-        # 7a. ConvNeXt pre-processing (optional, no timestep conditioning)
+        # 8a. ConvNeXt pre-processing (optional, no timestep conditioning)
         if self.convnext_stack is not None:
             h = self.convnext_stack(h)
 
-        # 7b. WaveNet pre-processing (optional, timestep-conditioned, outer residual)
+        # 8b. WaveNet pre-processing (optional, timestep-conditioned, outer residual)
         if self.wavenet_stack is not None:
             h = h + self.wavenet_stack(h, c)
 
-        # 8. DiT blocks
+        # 9. DiT blocks
         for block in self.dit_blocks:
             h = block(h, c, padding_mask)
 
-        # 9. Output projection: LayerNorm -> Linear -> (B, T, 128)
+        # 10. Output projection: LayerNorm -> Linear -> (B, T, 128)
         v = self.output_proj(self.output_norm(h))
 
         return v

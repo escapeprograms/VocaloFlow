@@ -4,7 +4,7 @@ Training loop, loss computation, and learning rate scheduling for VocaloFlow.
 
 ## flow_matching.py
 
-### `FlowMatchingLoss(sigma_min=1e-4, cfg_dropout_prob=0.0, stft_loss=None, stft_lambda=0.0)`
+### `FlowMatchingLoss(sigma_min=1e-4, cfg_dropout_prob=0.0, stft_loss=None, stft_lambda=0.0, energy_balance=None, energy_balance_lambda=0.4)`
 Optimal Transport Conditional Flow Matching loss with classifier-free guidance (CFG) dropout and optional multi-resolution STFT auxiliary loss.
 
 **Formulation**:
@@ -25,7 +25,8 @@ Optimal Transport Conditional Flow Matching loss with classifier-free guidance (
 - Calls `model(x_t, t, x_0, ...)` to get v_pred
 - Computes masked velocity MSE (normalized by valid frame count * mel channels)
 - If `stft_loss is not None`, computes STFT loss on `x_1_hat`
-- Returns `{"total", "velocity", "stft"}` — callers use `losses["total"]` for backward and log all three components
+- If `energy_balance is not None` and training, applies energy-balanced weighting: `blend = (1-λ) + λ * eb_weights` to the squared velocity error before averaging. EB weights are disabled during validation (`.training` flag).
+- Returns `{"total", "velocity", "stft", "eb_std"}` — callers use `losses["total"]` for backward and log all components
 
 ## stft_loss.py
 
@@ -52,16 +53,17 @@ Main training loop. Steps:
 5. Load and filter manifest (DTW cost ≤ config.max_dtw_cost)
 6. Train/val split via `split_by_song` (default) or `split_random` based on `config.split_mode`
 7. Create DataLoaders (4 workers, pin_memory, drop_last for train)
-8. Initialize VocaloFlow + EMA copy + AdamW optimizer + FlowMatchingLoss
-9. Restore model/EMA/optimizer state dicts if resuming, then free checkpoint from memory
-10. Initialize TensorBoard SummaryWriter
-11. Loop from `start_step`: forward → loss → backward → clip grads (1.0) → step → EMA update (with warmup)
-12. Log to TensorBoard + wandb every `log_every` steps, validate every `val_every`, checkpoint every `save_every`
+8. Initialize VocaloFlow + EMA copy + AdamW optimizer + FlowMatchingLoss + GradScaler (enabled by `config.use_amp`)
+9. Optionally initialize energy-balanced weight module (`EnergyBalancedWeight`) and STFT loss module based on config toggles
+10. Restore model/EMA/optimizer/scaler state dicts if resuming, then free checkpoint from memory
+11. Initialize TensorBoard SummaryWriter
+12. Loop from `start_step`: autocast forward → scaled loss → backward → unscale → clip grads (1.0) → scaler step → scaler update → EMA update (with warmup). When `use_amp=False`, the scaler/autocast are no-ops.
+13. Log to TensorBoard + wandb every `log_every` steps (including `eb_weight_std` and `grad_scale` when enabled), validate every `val_every`, checkpoint every `save_every`
 
 **EMA warmup**: The EMA update uses `effective_decay = min(config.ema_decay, (step+1)/(step+10))` so that early in training the EMA tracks the live model tightly (decay ≈ 0.1 at step 0, ≈ 0.918 at step 100, ≈ 0.991 at step 1000) and only converges to the configured `ema_decay=0.9999` after ~100k steps. **Without this warmup, val/loss would reflect the random init for thousands of steps** because `0.9999^N` decays very slowly — a previously-observed bug where val_loss was stuck near the random-init baseline (~2.0) while train loss dropped to ~0.4.
 
-### `validate(model, val_loader, criterion, device) -> dict[str, float]`
-Runs the given model on the val set under `torch.no_grad()` and returns the average per-batch losses as `{"total", "velocity", "stft"}`. Sets `model.eval()` and `criterion.eval()` for the duration of the call (the criterion toggle is critical — see `FlowMatchingLoss` note above), and restores `criterion.train()` in a `try/finally` block. Typically called with the EMA model.
+### `validate(model, val_loader, criterion, device, use_amp=False) -> dict[str, float]`
+Runs the given model on the val set under `torch.no_grad()` with optional `autocast` and returns the average per-batch losses as `{"total", "velocity", "stft"}`. Sets `model.eval()` and `criterion.eval()` for the duration of the call (the criterion toggle is critical — see `FlowMatchingLoss` note above), and restores `criterion.train()` in a `try/finally` block. Typically called with the EMA model.
 
 ### `main()`
 CLI entry point with argparse overrides for name, resume, config, data_dir, manifest, batch_size, lr, total_steps, max_dtw_cost, cfg_dropout, split_mode. `--resume NAME` and `--name NAME` both set `config.run_name`; resume is auto-detected by the presence of existing checkpoints.
@@ -83,8 +85,8 @@ Checkpoint save/load/discovery utilities, extracted from train.py for modularity
 ### `find_latest_checkpoint(checkpoint_dir) -> Optional[str]`
 Globs for `checkpoint_*.pt` in the directory, parses step numbers from filenames, returns the path with the highest step. Returns None if the directory is empty or doesn't exist.
 
-### `save_checkpoint(model, ema_model, optimizer, step, config, wandb_run_id=None) -> str`
-Saves `checkpoint_{step}.pt` to `config.checkpoint_dir` with model, EMA, optimizer state dicts, config, and `wandb_run_id`. Returns the written path.
+### `save_checkpoint(model, ema_model, optimizer, step, config, wandb_run_id=None, scaler=None) -> str`
+Saves `checkpoint_{step}.pt` to `config.checkpoint_dir` with model, EMA, optimizer state dicts, config, `wandb_run_id`, and optional `scaler_state_dict` (for AMP GradScaler). Returns the written path. Backward-compatible: old checkpoints without `scaler_state_dict` load fine via `.get()`.
 
 ### `load_checkpoint(path, device) -> dict`
 Thin wrapper around `torch.load(..., weights_only=False)`. Returns the raw checkpoint dict.
@@ -95,6 +97,9 @@ Training logs to both TensorBoard (`logs/<run_name>/`) and Weights & Biases (`en
 
 Logged scalars:
 - `train/loss` (= total), `train/loss_velocity`, `train/loss_stft`, `train/lr` — every `log_every` steps from the live model
+- `train/eb_weight_std` — when `energy_balanced_loss=True`, std of EB weights over valid frames (expected range 4-12)
+- `train/grad_scale` — when `use_amp=True`, the GradScaler's current loss scale factor
+- `train/grad_norm/plbert_proj`, `train/grad_norm/f0_embed`, `train/grad_norm/input_proj` — gradient norms for key layers
 - `val/loss` (= total), `val/loss_velocity`, `val/loss_stft` — every `val_every` steps from the EMA model
 
-When `config.stft_loss_enabled=False`, `loss_stft` is logged as 0 and `loss` == `loss_velocity` (zero-overhead disabled path — the STFT module is never instantiated).
+When `config.stft_loss_enabled=False`, `loss_stft` is logged as 0. When `config.energy_balanced_loss=False`, `eb_weight_std` is not logged.

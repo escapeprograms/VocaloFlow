@@ -86,6 +86,29 @@ class F0Embedding(nn.Module):
         return self.mlp(f0.unsqueeze(-1))
 
 
+class VoicingEmbedding(nn.Module):
+    """Learned embedding for binary voiced/unvoiced flag.
+
+    Args:
+        embed_dim: Output embedding dimension (default 32).
+    """
+
+    def __init__(self, embed_dim: int = 32) -> None:
+        super().__init__()
+        self.embedding = nn.Embedding(2, embed_dim)
+
+    def forward(self, voicing: Tensor) -> Tensor:
+        """Embed binary voicing flags.
+
+        Args:
+            voicing: (B, T) binary voiced/unvoiced flag (0.0 or 1.0).
+
+        Returns:
+            (B, T, embed_dim) dense voicing embedding.
+        """
+        return self.embedding(voicing.long())
+
+
 class PhonemeEmbedding(nn.Module):
     """Learned embedding table for phoneme token IDs (hard lookup).
 

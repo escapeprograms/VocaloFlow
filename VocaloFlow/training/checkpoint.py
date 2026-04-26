@@ -36,6 +36,7 @@ def save_checkpoint(
     step: int,
     config: VocaloFlowConfig,
     wandb_run_id: Optional[str] = None,
+    scaler: Optional[object] = None,
 ) -> str:
     """Save a training checkpoint and return the written path."""
     os.makedirs(config.checkpoint_dir, exist_ok=True)
@@ -48,6 +49,7 @@ def save_checkpoint(
             "optimizer_state_dict": optimizer.state_dict(),
             "config": config,
             "wandb_run_id": wandb_run_id,
+            "scaler_state_dict": scaler.state_dict() if scaler is not None else None,
         },
         path,
     )

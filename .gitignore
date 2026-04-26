@@ -34,7 +34,8 @@ Miniconda3-*.sh
 .geminiignore
 GEMINI.md
 
-
+#demos
+demo/
 
 # other
 wandb.txt

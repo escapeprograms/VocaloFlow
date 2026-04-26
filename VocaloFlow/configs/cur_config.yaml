@@ -1,7 +1,7 @@
-num_dit_blocks: 6
+num_dit_blocks: 10
 num_convnext_blocks: 0
 
-num_wavenet_blocks: 8
+num_wavenet_blocks: 12
 wavenet_kernel_size: 3
 wavenet_dilation_cycle: 4
 wavenet_skip_channels: 512
@@ -11,8 +11,17 @@ phoneme_blur_enabled: false
 phoneme_blend_fraction: 0.2
 
 use_plbert: true
+voicing_embed_dim: 32
 
 # Generator speaker embedding
-use_speaker_embedding: true
+use_speaker_embedding: false
 speaker_embedding_dim: 192
 global_speaker_embedding_path: "../SpeakerEmbedding/embeddings/Rachie/speaker_embedding.pt"
+
+# Energy-balanced loss
+energy_balanced_loss: true
+energy_balance_lambda: 0.7
+energy_balance_mode: both
+
+# Mixed precision
+use_amp: true

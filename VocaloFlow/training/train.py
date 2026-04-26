@@ -8,6 +8,7 @@ import sys
 from datetime import datetime
 
 import torch
+from torch.amp import autocast, GradScaler
 import wandb
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -167,11 +168,17 @@ def train(config: VocaloFlowConfig) -> None:
         energy_balance_lambda=config.energy_balance_lambda,
     )
 
+    scaler = GradScaler(enabled=config.use_amp)
+    if config.use_amp:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Mixed precision (AMP) enabled")
+
     # ── Restore state if resuming ─────────────────────────────────────────
     if resume_ckpt is not None:
         model.load_state_dict(resume_ckpt["model_state_dict"])
         ema_model.load_state_dict(resume_ckpt["ema_model_state_dict"])
         optimizer.load_state_dict(resume_ckpt["optimizer_state_dict"])
+        if resume_ckpt.get("scaler_state_dict") is not None:
+            scaler.load_state_dict(resume_ckpt["scaler_state_dict"])
         del resume_ckpt  # free memory
 
     writer = SummaryWriter(log_dir=config.log_dir)
@@ -206,15 +213,18 @@ def train(config: VocaloFlowConfig) -> None:
                 pg["lr"] = lr
 
             # Forward + backward
-            losses = criterion(model, x_0, x_1, f0, voicing, phoneme_ids, padding_mask,
-                               plbert_features=plbert_features,
-                               speaker_embedding=speaker_embedding)
-            loss = losses["total"]
+            with autocast("cuda", enabled=config.use_amp):
+                losses = criterion(model, x_0, x_1, f0, voicing, phoneme_ids, padding_mask,
+                                   plbert_features=plbert_features,
+                                   speaker_embedding=speaker_embedding)
+                loss = losses["total"]
 
             optimizer.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             # EMA update with warmup so the EMA tracks the live model tightly
             # at the start of training (otherwise val/loss reflects the random
@@ -230,22 +240,28 @@ def train(config: VocaloFlowConfig) -> None:
             # Logging
             if global_step % config.log_every == 0:
                 loss_val = loss.item()
-                velocity_val = losses["velocity"].item()
+                mse_val = losses["velocity_mse"].item()
                 stft_val = losses["stft"].item()
                 writer.add_scalar("train/loss", loss_val, global_step)
-                writer.add_scalar("train/loss_velocity", velocity_val, global_step)
+                writer.add_scalar("train/loss_velocity", mse_val, global_step)
                 writer.add_scalar("train/loss_stft", stft_val, global_step)
                 writer.add_scalar("train/lr", lr, global_step)
-                eb_std_val = losses["eb_std"].item()
                 log_dict = {
                     "train/loss": loss_val,
-                    "train/loss_velocity": velocity_val,
+                    "train/loss_velocity": mse_val,
                     "train/loss_stft": stft_val,
                     "train/lr": lr,
                 }
                 if config.energy_balanced_loss:
+                    eb_val = losses["velocity_eb"].item()
+                    eb_std_val = losses["eb_std"].item()
+                    log_dict["train/loss_velocity_eb"] = eb_val
                     log_dict["train/eb_weight_std"] = eb_std_val
+                    writer.add_scalar("train/loss_velocity_eb", eb_val, global_step)
                     writer.add_scalar("train/eb_weight_std", eb_std_val, global_step)
+                if config.use_amp:
+                    log_dict["train/grad_scale"] = scaler.get_scale()
+                    writer.add_scalar("train/grad_scale", scaler.get_scale(), global_step)
 
                 grad_norms = {}
                 if hasattr(model, "plbert_proj") and model.plbert_proj.weight.grad is not None:
@@ -261,36 +277,36 @@ def train(config: VocaloFlowConfig) -> None:
                 wandb.log(log_dict, step=global_step)
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] "
                       f"step={global_step}  loss={loss_val:.4f}  "
-                      f"vel={velocity_val:.4f}  stft={stft_val:.4f}  lr={lr:.2e}")
+                      f"vel={mse_val:.4f}  stft={stft_val:.4f}  lr={lr:.2e}")
 
             # Validation
             if global_step > 0 and global_step % config.val_every == 0:
-                val_losses = validate(ema_model, val_loader, criterion, device)
+                val_losses = validate(ema_model, val_loader, criterion, device, use_amp=config.use_amp)
                 writer.add_scalar("val/loss", val_losses["total"], global_step)
-                writer.add_scalar("val/loss_velocity", val_losses["velocity"], global_step)
+                writer.add_scalar("val/loss_velocity", val_losses["velocity_mse"], global_step)
                 writer.add_scalar("val/loss_stft", val_losses["stft"], global_step)
                 wandb.log(
                     {
                         "val/loss": val_losses["total"],
-                        "val/loss_velocity": val_losses["velocity"],
+                        "val/loss_velocity": val_losses["velocity_mse"],
                         "val/loss_stft": val_losses["stft"],
                     },
                     step=global_step,
                 )
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] "
                       f"step={global_step}  val_loss={val_losses['total']:.4f}  "
-                      f"val_vel={val_losses['velocity']:.4f}  "
+                      f"val_vel={val_losses['velocity_mse']:.4f}  "
                       f"val_stft={val_losses['stft']:.4f}")
                 model.train()
 
             # Checkpoint
             if global_step > 0 and global_step % config.save_every == 0:
-                save_checkpoint(model, ema_model, optimizer, global_step, config, wandb.run.id)
+                save_checkpoint(model, ema_model, optimizer, global_step, config, wandb.run.id, scaler=scaler)
 
             global_step += 1
 
     # Final save
-    save_checkpoint(model, ema_model, optimizer, global_step, config, wandb.run.id)
+    save_checkpoint(model, ema_model, optimizer, global_step, config, wandb.run.id, scaler=scaler)
     writer.close()
     wandb.finish()
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Training complete.")
@@ -302,13 +318,14 @@ def validate(
     val_loader: DataLoader,
     criterion: FlowMatchingLoss,
     device: torch.device,
+    use_amp: bool = False,
 ) -> dict[str, float]:
     """Run validation and return average loss components {total, velocity, stft}."""
     model.eval()
     # Disable CFG dropout during validation — criterion is an nn.Module
     # whose .training flag is independent of model.training.
     criterion.eval()
-    sums = {"total": 0.0, "velocity": 0.0, "stft": 0.0}
+    sums = {"total": 0.0, "velocity_mse": 0.0, "stft": 0.0}
     n_batches = 0
 
     try:
@@ -326,9 +343,10 @@ def validate(
             if speaker_embedding is not None:
                 speaker_embedding = speaker_embedding.to(device)
 
-            losses = criterion(model, x_0, x_1, f0, voicing, phoneme_ids, padding_mask,
-                               plbert_features=plbert_features,
-                               speaker_embedding=speaker_embedding)
+            with autocast("cuda", enabled=use_amp):
+                losses = criterion(model, x_0, x_1, f0, voicing, phoneme_ids, padding_mask,
+                                   plbert_features=plbert_features,
+                                   speaker_embedding=speaker_embedding)
             for k in sums:
                 sums[k] += losses[k].item()
             n_batches += 1

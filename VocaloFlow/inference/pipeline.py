@@ -91,7 +91,7 @@ _DEFAULT_PHONESET = os.path.join(
     _SOULX_DIR, "soulxsinger", "utils", "phoneme", "phone_set.json"
 )
 _DEFAULT_RMVPE = os.path.join(
-    _SOULX_DIR, "pretrained_models", "rmvpe", "rmvpe.pt"
+    _SOULX_DIR, "pretrained_models", "SoulX-Singer-Preprocess", "rmvpe", "rmvpe.pt"
 )
 
 SR = 24000
@@ -115,7 +115,9 @@ def parse_ustx(ustx_path: str) -> dict:
           - bpm (float)
           - resolution (int): ticks per beat
           - ms_per_tick (float)
-          - notes: list of dicts with position_ticks, duration_ticks, tone, lyric
+          - notes: list of dicts with position_ticks, duration_ticks, tone,
+                   lyric, pitch_points, snap_first, vibrato
+          - pitd_curve: dict with xs/ys arrays (part-level pitch deviation), or None
     """
     import yaml
 
@@ -143,7 +145,17 @@ def parse_ustx(ustx_path: str) -> dict:
             "duration_ticks": int(n["duration"]),
             "tone": int(n["tone"]),
             "lyric": str(n.get("lyric", "")),
+            "pitch_points": n.get("pitch", {}).get("data", []),
+            "snap_first": n.get("pitch", {}).get("snap_first", True),
+            "vibrato": n.get("vibrato", {}),
         })
+
+    # Part-level pitch deviation curve (usually empty)
+    pitd_curve = None
+    for c in part.get("curves", []):
+        if c.get("abbr") == "pitd" and c.get("xs") and c.get("ys"):
+            pitd_curve = {"xs": c["xs"], "ys": c["ys"]}
+            break
 
     print(f"[pipeline] Parsed {len(notes)} notes from {os.path.basename(ustx_path)} "
           f"(bpm={bpm}, resolution={resolution})")
@@ -152,6 +164,7 @@ def parse_ustx(ustx_path: str) -> dict:
         "resolution": resolution,
         "ms_per_tick": ms_per_tick,
         "notes": notes,
+        "pitd_curve": pitd_curve,
     }
 
 
@@ -287,6 +300,96 @@ def extract_or_load_f0(
             print(f"[pipeline] RMVPE extraction failed ({e}), falling back to MIDI pitch F0")
 
     return synthesize_f0_from_midi(notes_data, total_frames)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Step 4b: USTX pitch-curve F0 synthesis
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _interpolate_pitch_points(pitch_points: list[dict], t_ms: float) -> float:
+    """Linearly interpolate cents deviation from sorted pitch control points."""
+    if not pitch_points:
+        return 0.0
+    if t_ms <= pitch_points[0]["x"]:
+        return float(pitch_points[0]["y"])
+    if t_ms >= pitch_points[-1]["x"]:
+        return float(pitch_points[-1]["y"])
+    for i in range(len(pitch_points) - 1):
+        x0, y0 = pitch_points[i]["x"], pitch_points[i]["y"]
+        x1, y1 = pitch_points[i + 1]["x"], pitch_points[i + 1]["y"]
+        if x0 <= t_ms <= x1:
+            alpha = (t_ms - x0) / (x1 - x0) if x1 != x0 else 0.0
+            return y0 + alpha * (y1 - y0)
+    return float(pitch_points[-1]["y"])
+
+
+def synthesize_f0_from_ustx_pitch(
+    notes_data: dict, total_frames: int, voicing: np.ndarray | None = None,
+) -> np.ndarray:
+    """Synthesize F0 from USTX per-note pitch control points.
+
+    Each note has a base MIDI tone and pitch control points that define
+    cents deviation over time.  The result is a frame-level F0 in Hz with
+    unvoiced frames zeroed out (if *voicing* is provided).
+    """
+    f0 = np.zeros(total_frames, dtype=np.float32)
+    ms_per_tick = notes_data["ms_per_tick"]
+    frame_dur_s = HOP / SR
+    frame_dur_ms = frame_dur_s * 1000.0
+
+    for note in notes_data["notes"]:
+        start_s = note["position_ticks"] * ms_per_tick / 1000.0
+        dur_s = note["duration_ticks"] * ms_per_tick / 1000.0
+        start_frame = int(start_s / frame_dur_s)
+        end_frame = int((start_s + dur_s) / frame_dur_s)
+        start_frame = max(0, min(start_frame, total_frames))
+        end_frame = max(0, min(end_frame, total_frames))
+
+        base_hz = 440.0 * (2.0 ** ((note["tone"] - 69) / 12.0))
+        pitch_points = note.get("pitch_points", [])
+
+        for fi in range(start_frame, end_frame):
+            t_ms = (fi - start_frame) * frame_dur_ms
+            cents = _interpolate_pitch_points(pitch_points, t_ms)
+            f0[fi] = base_hz * (2.0 ** (cents / 1200.0))
+
+    if voicing is not None:
+        f0[~voicing.astype(bool)] = 0.0
+
+    voiced = np.sum(f0 > 0)
+    print(f"[pipeline] Synthesized F0 from USTX pitch curves: {total_frames} frames, "
+          f"voiced ratio={voiced / max(total_frames, 1):.2%}")
+    return f0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Step 4c: Note-coverage voicing mask
+# ═══════════════════════════════════════════════════════════════════════════
+
+def get_note_coverage_voicing(
+    notes_data: dict,
+    total_frames: int,
+) -> np.ndarray:
+    """Derive a voiced/unvoiced mask from MIDI note coverage.
+
+    A frame is voiced iff it falls within any note's time range.
+    Frames in silence gaps between notes are unvoiced.
+    """
+    note_coverage = np.zeros(total_frames, dtype=bool)
+    ms_per_tick = notes_data["ms_per_tick"]
+    frame_dur_s = HOP / SR
+    for note in notes_data["notes"]:
+        start_s = note["position_ticks"] * ms_per_tick / 1000.0
+        dur_s = note["duration_ticks"] * ms_per_tick / 1000.0
+        s = max(0, min(int(start_s / frame_dur_s), total_frames))
+        e = max(0, min(int((start_s + dur_s) / frame_dur_s), total_frames))
+        note_coverage[s:e] = True
+
+    voicing = note_coverage.astype(np.float32)
+    voiced_count = int(np.sum(voicing > 0))
+    print(f"[pipeline] Note-coverage voicing: voiced={voiced_count}/{total_frames} "
+          f"({voiced_count / max(total_frames, 1) * 100:.1f}%)")
+    return voicing
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -471,6 +574,48 @@ def load_model(checkpoint_path: str, device: torch.device) -> VocaloFlow:
 # Step 7: Chunked ODE inference
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _build_chunk_window(
+    ci: int,
+    start: int,
+    end: int,
+    length: int,
+    total_frames: int,
+    overlap: int,
+    chunk_size: int,
+    starts: list[int],
+    tail_chunk_idx: int | None,
+) -> np.ndarray:
+    """Build the blending window for a single chunk.
+
+    Regular chunks get linear fade-in at the left edge (if not the first
+    chunk) and fade-out at the right edge (if not reaching the end).
+
+    The tail chunk (appended to cover the sequence end) uses a window
+    that is zero until the previous chunk's fade-out region, then
+    crossfades over exactly *overlap* frames, then holds full weight to
+    the end.  This keeps the crossfade clean and avoids the large
+    averaging region that would result from a naive overlap.
+    """
+    if ci == tail_chunk_idx:
+        prev_end = min(starts[ci - 1] + chunk_size, total_frames)
+        xfade_start = prev_end - overlap - start
+        xfade_end = prev_end - start
+
+        window = np.zeros(length, dtype=np.float32)
+        window[xfade_start:xfade_end] = np.linspace(0, 1, xfade_end - xfade_start)
+        window[xfade_end:] = 1.0
+        return window
+
+    window = np.ones(length, dtype=np.float32)
+    if start > 0 and overlap > 0:
+        fade_len = min(overlap, length)
+        window[:fade_len] = np.linspace(0, 1, fade_len)
+    if end < total_frames and overlap > 0:
+        fade_len = min(overlap, length)
+        window[length - fade_len:] = np.linspace(1, 0, fade_len)
+    return window
+
+
 def infer_chunked(
     model: VocaloFlow,
     prior_mel: np.ndarray,
@@ -479,12 +624,16 @@ def infer_chunked(
     phoneme_ids: np.ndarray,
     chunk_size: int = 256,
     overlap: int = 16,
-    num_steps: int = 32,
+    num_steps: int = 16,
     method: str = "midpoint",
     device: torch.device = torch.device("cpu"),
     cfg_scale: float = 1.0,
     plbert_features: np.ndarray | None = None,
     speaker_embedding: torch.Tensor | None = None,
+    time_schedule: str = "sway",
+    sway_coeff: float = -1.0,
+    atol: float = 1e-5,
+    rtol: float = 1e-5,
 ) -> np.ndarray:
     """Run chunked ODE inference with overlap-add blending.
 
@@ -498,10 +647,16 @@ def infer_chunked(
     T = prior_mel.shape[0]
     stride = max(1, chunk_size - overlap)
 
-    # Build chunk start positions covering the full sequence
+    # Build chunk start positions covering the full sequence.
+    # If the last regular chunk doesn't reach T, append a tail chunk
+    # starting at T-chunk_size.  Its blending window is handled specially
+    # by _build_chunk_window so the crossfade aligns with the previous
+    # chunk's fade-out (no large averaging region).
     starts = list(range(0, max(1, T - overlap), stride))
+    tail_chunk_idx = None
     if starts[-1] + chunk_size < T:
         starts.append(max(0, T - chunk_size))
+        tail_chunk_idx = len(starts) - 1
 
     output_mel = np.zeros((T, 128), dtype=np.float32)
     weight = np.zeros(T, dtype=np.float32)
@@ -544,17 +699,15 @@ def infer_chunked(
 
         pred = sample_ode(model, pm_t, f_t, v_t, ph_t, num_steps, method, mask,
                           cfg_scale=cfg_scale, plbert_features=pl_t,
-                          speaker_embedding=speaker_embedding)
+                          speaker_embedding=speaker_embedding,
+                          time_schedule=time_schedule, sway_coeff=sway_coeff,
+                          atol=atol, rtol=rtol)
         pred = pred[0, :length].cpu().numpy()
 
-        # Blending window: fade in at left overlap, fade out at right overlap
-        window = np.ones(length, dtype=np.float32)
-        if start > 0 and overlap > 0:
-            fade_len = min(overlap, length)
-            window[:fade_len] = np.linspace(0, 1, fade_len)
-        if end < T and overlap > 0:
-            fade_len = min(overlap, length)
-            window[length - fade_len:] = np.linspace(1, 0, fade_len)
+        window = _build_chunk_window(
+            ci, start, end, length, T, overlap,
+            chunk_size, starts, tail_chunk_idx,
+        )
 
         output_mel[start:end] += pred * window[:, None]
         weight[start:end] += window
@@ -600,15 +753,31 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--prior-wav", default=None,
                    help="Pre-rendered WAV of the USTX. If omitted, attempts C# Player API render.")
     p.add_argument("--f0", default=None,
-                   help="Pre-extracted F0 .npy file (T,) in Hz. If omitted, extracts from prior WAV.")
+                   help="Pre-extracted F0 .npy file (T,) in Hz. Implies --f0-mode file.")
+    p.add_argument("--f0-mode", default="ustx",
+                   choices=["ustx", "rmvpe", "midi", "file"],
+                   help="F0/voicing extraction strategy: "
+                        "ustx = pitch curves from USTX + phoneme voicing (default); "
+                        "rmvpe = extract from prior WAV; "
+                        "midi = flat MIDI pitches; "
+                        "file = load from --f0 .npy")
     p.add_argument("--output", default="output.wav", help="Output WAV path")
     p.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"],
                    help="Compute device")
-    p.add_argument("--num-ode-steps", type=int, default=32, help="ODE integration steps")
-    p.add_argument("--ode-method", default="midpoint", choices=["euler", "midpoint"],
+    p.add_argument("--num-ode-steps", type=int, default=16, help="ODE integration steps")
+    p.add_argument("--ode-method", default="midpoint",
+                   choices=["euler", "midpoint", "rk4", "dopri5"],
                    help="ODE integration method")
+    p.add_argument("--time-schedule", default="sway", choices=["uniform", "sway"],
+                   help="Timestep distribution for ODE integration")
+    p.add_argument("--sway-coeff", type=float, default=-1.0,
+                   help="Sway coefficient for 'sway' time schedule")
+    p.add_argument("--atol", type=float, default=1e-5,
+                   help="Absolute tolerance for adaptive ODE methods (dopri5)")
+    p.add_argument("--rtol", type=float, default=1e-5,
+                   help="Relative tolerance for adaptive ODE methods (dopri5)")
     p.add_argument("--chunk-size", type=int, default=256,
-                   help="Inference chunk size in frames (256 = 5.12s)")
+                   help="Inference chunk size in frames (default 256 = 5.12s)")
     p.add_argument("--overlap", type=int, default=16,
                    help="Overlap frames for crossfade between chunks (16 = 0.32s)")
     p.add_argument("--rmvpe-model", default=_DEFAULT_RMVPE,
@@ -626,6 +795,49 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--speaker-embedding", default=_DEFAULT_SPEAKER_EMB,
                    help="Path to speaker embedding .pt file (default: Rachie)")
     return p.parse_args()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Conditioning extraction strategies
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _extract_conditioning_ustx(
+    notes_data: dict, T: int, phoneset_path: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """USTX mode: voicing from note coverage -> F0 from pitch curves -> phonemes."""
+    voicing = get_note_coverage_voicing(notes_data, T)
+    f0 = synthesize_f0_from_ustx_pitch(notes_data, T, voicing=voicing)
+    f0 = resample_1d(f0, T, mode="linear").numpy()
+    phoneme_ids = build_phoneme_ids(
+        notes_data["notes"], notes_data["ms_per_tick"], T, phoneset_path,
+    )
+    return f0, voicing, phoneme_ids
+
+
+def _extract_conditioning_f0_based(
+    f0_raw: np.ndarray,
+    notes_data: dict,
+    T: int,
+    phoneset_path: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Shared path for modes where F0 is extracted first, voicing = f0 > 0."""
+    f0 = resample_1d(f0_raw, T, mode="linear").numpy()
+    voicing = get_voiced_mask(f0).astype(np.float32)
+    phoneme_ids = build_phoneme_ids(
+        notes_data["notes"], notes_data["ms_per_tick"], T, phoneset_path,
+    )
+    return f0, voicing, phoneme_ids
+
+
+_F0_EXTRACTORS = {
+    "file":  lambda args, **kw: np.load(args.f0).astype(np.float32),
+    "rmvpe": lambda args, **kw: extract_f0_rmvpe(
+        kw["wav_path"], args.rmvpe_model, kw["device"],
+    ),
+    "midi":  lambda args, **kw: synthesize_f0_from_midi(
+        kw["notes_data"], kw["total_frames"],
+    ),
+}
 
 
 def main():
@@ -663,27 +875,30 @@ def main():
     print(f"[diag] prior_mel  near-silent frames: {_silent_frames}/{T} "
           f"({_silent_frames / max(T, 1) * 100:.1f}%)")
 
-    # Step 4: Extract F0 and align to mel length
-    f0 = extract_or_load_f0(
-        f0_path=args.f0, wav_path=prior_wav,
-        rmvpe_model_path=args.rmvpe_model, device=str(device),
-        notes_data=notes_data, total_frames=T,
-    )
-    f0 = resample_1d(f0, T, mode="linear").numpy()
+    # Steps 4-6: Extract conditioning (f0, voicing, phoneme_ids)
+    f0_mode = args.f0_mode
+    if args.f0 is not None and f0_mode == "ustx":
+        f0_mode = "file"
+    print(f"[pipeline] F0 mode: {f0_mode}")
 
-    # Step 5: Derive voicing
-    voicing = get_voiced_mask(f0).astype(np.float32)
+    if f0_mode == "ustx":
+        f0, voicing, phoneme_ids = _extract_conditioning_ustx(
+            notes_data, T, args.phoneset,
+        )
+    else:
+        f0_raw = _F0_EXTRACTORS[f0_mode](
+            args, wav_path=prior_wav, device=str(device),
+            notes_data=notes_data, total_frames=T,
+        )
+        f0, voicing, phoneme_ids = _extract_conditioning_f0_based(
+            f0_raw, notes_data, T, args.phoneset,
+        )
 
     # ── Diagnostic: F0 and voicing stats ──
     print(f"[diag] f0         min={f0.min():.1f}  max={f0.max():.1f}  "
           f"mean(voiced)={f0[f0 > 0].mean() if np.any(f0 > 0) else 0:.1f} Hz")
     print(f"[diag] voicing    voiced={np.sum(voicing > 0)}/{T} "
           f"({np.mean(voicing > 0) * 100:.1f}%)")
-
-    # Step 6: Build phoneme IDs
-    phoneme_ids = build_phoneme_ids(
-        notes_data["notes"], notes_data["ms_per_tick"], T, args.phoneset
-    )
 
     if args.mask_phonemes:
         phoneme_ids = np.zeros_like(phoneme_ids)
@@ -730,6 +945,8 @@ def main():
         device=device, cfg_scale=args.cfg_scale,
         plbert_features=plbert_features,
         speaker_embedding=speaker_embedding,
+        time_schedule=args.time_schedule, sway_coeff=args.sway_coeff,
+        atol=args.atol, rtol=args.rtol,
     )
 
     # ── Diagnostic: output mel vs prior mel ──

@@ -31,6 +31,7 @@ class VocaloFlowConfig:
     convnext_kernel_size: int = 7       # Depthwise conv kernel (7 @ 20ms/frame = 140ms)
     input_channels: int = 385           # 128 (x_t) + 128 (prior) + 64 (f0) + 64 (ph) + 1 (vuv)
     dropout: float = 0.1
+    voicing_embed_dim: int = 1          # Voicing embedding dim (1 = raw scalar, >1 = learned nn.Embedding)
 
     # ── Phoneme Blurring ──────────────────────────────────────────────────
     phoneme_blur_enabled: bool = False   # Use BlurredPhonemeEmbedding vs hard lookup
@@ -63,6 +64,7 @@ class VocaloFlowConfig:
     total_steps: int = 200_000
     ema_decay: float = 0.9999
     grad_clip: float = 1.0
+    use_amp: bool = False               # torch.amp mixed precision (reduces VRAM ~40-50%)
     log_every: int = 50
     val_every: int = 1000
     save_every: int = 5000

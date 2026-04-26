@@ -1,0 +1,71 @@
+data_dir: ../Data/Rachie
+manifest_path: ../Data/Rachie/manifest.csv
+mel_channels: 128
+sr: 24000
+hop: 480
+phoneme_vocab_size: 2820
+phoneme_embed_dim: 64
+f0_embed_dim: 64
+max_seq_len: 256
+max_dtw_cost: 100.0
+val_fraction: 0.05
+seed: 42
+split_mode: song
+hidden_dim: 512
+num_heads: 8
+head_dim: 64
+ffn_dim: 2048
+num_dit_blocks: 10
+num_convnext_blocks: 0
+convnext_kernel_size: 7
+input_channels: 385
+dropout: 0.1
+voicing_embed_dim: 32
+phoneme_blur_enabled: false
+phoneme_blend_fraction: 0.2
+use_plbert: true
+plbert_feature_dim: 768
+plbert_proj_dim: 64
+use_speaker_embedding: false
+speaker_embedding_dim: 192
+global_speaker_embedding_path: ../SpeakerEmbedding/embeddings/Rachie/speaker_embedding.pt
+num_wavenet_blocks: 12
+wavenet_kernel_size: 3
+wavenet_dilation_cycle: 4
+wavenet_skip_channels: 512
+wavenet_dropout: 0.1
+batch_size: 32
+learning_rate: 0.0001
+weight_decay: 0.01
+warmup_steps: 1000
+total_steps: 200000
+ema_decay: 0.9999
+grad_clip: 1.0
+use_amp: true
+log_every: 50
+val_every: 1000
+save_every: 5000
+cfg_dropout_prob: 0.2
+cfg_scale: 2.0
+sigma_min: 0.0001
+stft_loss_enabled: false
+stft_loss_lambda: 0.1
+stft_resolutions:
+- - 16
+  - 4
+  - 16
+- - 32
+  - 8
+  - 32
+- - 64
+  - 16
+  - 64
+energy_balanced_loss: true
+energy_balance_lambda: 0.7
+energy_balance_epsilon: 0.0001
+energy_balance_mode: both
+num_ode_steps: 32
+ode_method: midpoint
+run_name: 4-25-big
+checkpoint_dir: ./checkpoints\4-25-big
+log_dir: ./logs\4-25-big

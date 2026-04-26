@@ -1,0 +1,24 @@
+# Experiment 9: Big WaveNet + Energy-Balanced Base Training
+# Launch: python -m training.train --name exp9_scaled_eb --config configs/exp9_scaled_eb/config.yaml
+
+# Architecture
+num_wavenet_blocks: 12
+num_dit_blocks: 10
+num_convnext_blocks: 0
+voicing_embed_dim: 32
+
+# Conditioning
+use_plbert: true
+use_speaker_embedding: false
+
+# Energy-balanced loss
+energy_balanced_loss: true
+energy_balance_lambda: 0.7
+energy_balance_mode: both
+
+# Training
+total_steps: 150000
+save_every: 10000
+
+# Mixed precision
+use_amp: true

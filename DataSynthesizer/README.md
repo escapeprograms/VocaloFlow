@@ -61,28 +61,32 @@ The pipeline uses **two** conda environments:
 - **`vocaloflow-datasynthesizer`** — parent orchestration env. Runs all `pipelines/`, `stages/`, `alignment/`, and `utils/` code. Lightweight — no torch, no SoulX-Singer package.
 - **`soulxsinger`** — dedicated subprocess env for the GPU-heavy SoulX-Singer inference and RMVPE note extraction. Contains torch (cu118) + the SoulX-Singer package. Built from `SoulX-Singer/requirements.txt`, with two pinned overrides against upstream drift: `torch==2.2.0+cu118` (from PyTorch cu118 index) and `transformers==4.42.4` + `tokenizers==0.19.1` (upstream `>=4.53.0` breaks SoulX-Singer's `LlamaAttention` call site).
 
-The parent env launches the subprocess via `config.SOULX_PYTHON`, which points at the `soulxsinger` env's `python.exe`. You never activate `soulxsinger` directly — run everything via `conda run -n vocaloflow-datasynthesizer ...` and the subprocess dispatch happens automatically.
+The parent env launches the subprocess via `config.SOULX_PYTHON`, which points at the `soulxsinger` env's `python.exe`. You never activate `soulxsinger` directly — activate `vocaloflow-datasynthesizer` and run scripts with `python` directly, and the subprocess dispatch happens automatically.
 
 ### Dependencies
 Ensure prerequisites like Python, Conda, `librosa`, `mido`, `soundfile`, and `pyworld` python packages are available.
 
 ### Running Scripts
 
-All scripts should be run from the `DataSynthesizer/` directory:
+All scripts should be run from the `DataSynthesizer/` directory. Activate the conda environment first, then run scripts directly with `python` so output streams to the terminal in real time:
+
+```bash
+conda activate vocaloflow-datasynthesizer
+```
 
 **Single song** (development / testing):
 ```bash
-conda run -n vocaloflow-datasynthesizer python pipelines/synthesize_v2.py --dali_id <id> --mode line --provider WillStetson
+python pipelines/synthesize_v2.py --dali_id <id> --mode line --provider WillStetson
 ```
 
 **Full English dataset** (production):
 ```bash
-conda run -n vocaloflow-datasynthesizer python pipelines/synthesize_dataset_v2.py --phases 12345 --songs_per_batch 100 --provider Rachie
+python pipelines/synthesize_dataset_v2.py --phases 12345 --songs_per_batch 100 --provider Rachie
 ```
 
 **Resume a specific phase** (e.g. extraction + alignment only, after a crash):
 ```bash
-conda run -n vocaloflow-datasynthesizer python pipelines/synthesize_dataset_v2.py --phases 34 --songs_per_batch 50 --provider WillStetson
+python pipelines/synthesize_dataset_v2.py --phases 34 --songs_per_batch 50 --provider WillStetson
 ```
 
 Key Arguments:

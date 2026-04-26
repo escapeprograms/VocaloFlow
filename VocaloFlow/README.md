@@ -35,7 +35,7 @@ VocaloFlow/
 │   ├── README.md            # Memory palace (model)
 │   ├── vocaloflow.py        # Top-level VocaloFlow nn.Module
 │   ├── dit_block.py         # DiTBlock + AdaLNZero
-│   ├── embeddings.py        # TimestepMLP + PhonemeEmbedding
+│   ├── embeddings.py        # TimestepMLP + PhonemeEmbedding + VoicingEmbedding
 │   └── rope.py              # Rotary Position Embeddings
 │
 ├── training/                # Training loop and loss
@@ -136,17 +136,25 @@ python -m inference.pipeline
 python -m inference.pipeline 
     --ustx "../demo/let_it_go/let_it_go.ustx" 
     --prior-wav "../demo/let_it_go/prior_let_it_go.wav" 
-    --checkpoint "checkpoints/4-23-embed/checkpoint_65000.pt"
-    --output "../demo/let_it_go/4-23-embed/65000/output.wav"
+    --checkpoint "checkpoints/4-25-big/checkpoint_105000.pt"
+    --output "../demo/let_it_go/4-25-big/105000/output.wav"
     --save-mels
+    --num-ode-steps 16
 
 python -m inference.pipeline 
     --ustx "../demo/we_are_charlie/we_are_charlie.ustx" 
-    --checkpoint "checkpoints/4-16-wavenet/checkpoint_55000.pt" 
-    --output "../demo/we_are_charlie/4-16-wavenet/output.wav"
+    --prior-wav "../demo/we_are_charlie/output_prior.wav" 
+    --checkpoint "checkpoints/4-25-big/checkpoint_105000.pt" 
+    --output "../demo/we_are_charlie/4-25-big/output.wav"
     --save-mels
 
-
+python -m inference.pipeline 
+    --ustx "../demo/thinking_miku/thinking_miku.ustx" 
+    --prior-wav "../demo/thinking_miku/output_prior.wav" 
+    --checkpoint "checkpoints/4-25-big/checkpoint_105000.pt" 
+    --output "../demo/thinking_miku/4-25-big/output.wav"
+    --save-mels
+    --num-ode-steps 16
 
 
 ```bash
@@ -214,12 +222,13 @@ Single dataclass holding all hyperparameters. Key values:
 - `max_dtw_cost=200.0` — Quality filter threshold
 - `phoneme_vocab_size=2820`, `phoneme_embed_dim=64`, `f0_embed_dim=64`
 - `hidden_dim=512`, `num_heads=8`, `ffn_dim=2048`, `num_dit_blocks=6`, `dropout=0.1`
-- `input_channels=385` (128+128+64+64+1)
-- `use_plbert=False`, `plbert_feature_dim=768`, `plbert_proj_dim=64` — PL-BERT integration (toggled off by default; when on, replaces learned `PhonemeEmbedding` with frozen PL-BERT features projected 768->64, keeping `input_channels=385` unchanged)
-- `use_speaker_embedding=False`, `speaker_embedding_dim=192`, `global_speaker_embedding_path=""` — ECAPA-TDNN speaker embedding (toggled off by default; when on, adds a zero-init Linear(192, 512) projection to the timestep conditioning `c`, no input_channels change). `global_speaker_embedding_path` points to a single `.pt` file shared across all chunks (recommended for single-speaker); leave empty to fall back to per-chunk `speaker_embedding.npy` files
+- `voicing_embed_dim=1` — Voicing embedding dimension (1 = raw scalar, >1 = learned `nn.Embedding(2, dim)` with LayerNorm). Input dimension computed dynamically: `mel_channels*2 + f0_embed_dim + phoneme_embed_dim + voicing_embed_dim`.
+- `use_plbert=False`, `plbert_feature_dim=768`, `plbert_proj_dim=64` — PL-BERT integration (toggled off by default; when on, replaces learned `PhonemeEmbedding` with frozen PL-BERT features projected 768->64)
+- `use_speaker_embedding=False`, `speaker_embedding_dim=192`, `global_speaker_embedding_path=""` — ECAPA-TDNN speaker embedding (toggled off by default; when on, adds a zero-init Linear(192, 512) projection to the timestep conditioning `c`). `global_speaker_embedding_path` points to a single `.pt` file shared across all chunks
 - `cfg_dropout_prob=0.2`, `cfg_scale=2.0`
 - `max_seq_len=256` — Covers p95 of sequence lengths
 - `batch_size=32`, `learning_rate=1e-4`, `total_steps=200_000`
+- `use_amp=False` — Mixed precision training via `torch.amp` (autocast + GradScaler). Reduces VRAM ~40-50%. GradScaler state is saved/restored in checkpoints.
 
 
 
