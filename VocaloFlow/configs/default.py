@@ -56,7 +56,18 @@ class VocaloFlowConfig:
     wavenet_skip_channels: int = 512     # drop to 256 to save params if needed
     wavenet_dropout: float = 0.1
 
-    # ── Training ──────────────────────────────────────────────────────────
+    # ── Architecture Selection ────────────────────────���───────────────────
+    architecture: str = "hybrid"         # "hybrid" (DiT + optional WaveNet/ConvNeXt) or "wavenet_pure"
+
+    # ── Pure WaveNet Denoiser (only used when architecture = "wavenet_pure") ─
+    wavenet_pure_residual_channels: int = 256
+    wavenet_pure_num_layers: int = 20
+    wavenet_pure_dilation_cycle: int = 10   # 2^(i%10) = [1,2,4,...,512] per cycle
+    wavenet_pure_skip_channels: int = 256
+    wavenet_pure_kernel_size: int = 3
+    wavenet_pure_dropout: float = 0.1
+
+    # ── Training ──────────────���───────────────────────────────────────────
     batch_size: int = 32
     learning_rate: float = 1e-4
     weight_decay: float = 0.01

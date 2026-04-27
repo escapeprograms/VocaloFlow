@@ -47,6 +47,7 @@ for _p in [_VOCALOFLOW_DIR, _SOULX_DIR]:
 # VocaloFlow imports
 from configs.default import VocaloFlowConfig
 from model.vocaloflow import VocaloFlow
+from model.vocaloflow_wavenet import VocaloFlowPureWaveNet
 from inference.inference import sample_ode
 from utils.resample import resample_1d, resample_2d, resolve_phoneme_indirection
 
@@ -547,11 +548,15 @@ def build_plbert_frame_features(
 # Step 6: Load model
 # ═══════════════════════════════════════════════════════════════════════════
 
-def load_model(checkpoint_path: str, device: torch.device) -> VocaloFlow:
+def load_model(checkpoint_path: str, device: torch.device) -> torch.nn.Module:
     """Load VocaloFlow from a training checkpoint (uses EMA weights)."""
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = ckpt.get("config", VocaloFlowConfig())
-    model = VocaloFlow(config).to(device)
+    arch = getattr(config, "architecture", "hybrid")
+    if arch == "wavenet_pure":
+        model = VocaloFlowPureWaveNet(config).to(device)
+    else:
+        model = VocaloFlow(config).to(device)
 
     state_key = "ema_model_state_dict" if "ema_model_state_dict" in ckpt else "model_state_dict"
     missing, unexpected = model.load_state_dict(ckpt[state_key], strict=False)
@@ -617,7 +622,7 @@ def _build_chunk_window(
 
 
 def infer_chunked(
-    model: VocaloFlow,
+    model: torch.nn.Module,
     prior_mel: np.ndarray,
     f0: np.ndarray,
     voicing: np.ndarray,

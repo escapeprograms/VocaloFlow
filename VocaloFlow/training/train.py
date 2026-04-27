@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from configs.default import VocaloFlowConfig
 from model.vocaloflow import VocaloFlow
+from model.vocaloflow_wavenet import VocaloFlowPureWaveNet
 from training.checkpoint import find_latest_checkpoint, load_checkpoint, save_checkpoint
 from training.energy_balance import EnergyBalancedWeight
 from training.flow_matching import FlowMatchingLoss
@@ -25,6 +26,18 @@ from training.lr_schedule import get_lr
 from utils.data_helpers import load_manifest, filter_manifest, split_by_song, split_random
 from utils.dataset import VocaloFlowDataset
 from utils.collate import vocaloflow_collate_fn, validate_batch_signals
+
+
+def build_model(config: VocaloFlowConfig) -> torch.nn.Module:
+    """Instantiate the correct model class based on config.architecture."""
+    if config.architecture == "wavenet_pure":
+        return VocaloFlowPureWaveNet(config)
+    if config.architecture == "hybrid":
+        return VocaloFlow(config)
+    raise ValueError(
+        f"Unknown architecture: {config.architecture!r}. "
+        f"Expected 'hybrid' or 'wavenet_pure'."
+    )
 
 
 def train(config: VocaloFlowConfig) -> None:
@@ -129,7 +142,7 @@ def train(config: VocaloFlowConfig) -> None:
     del _probe
 
     # ── Model ─────────────────────────────────────────────────────────────
-    model = VocaloFlow(config).to(device)
+    model = build_model(config).to(device)
     ema_model = copy.deepcopy(model)
     ema_model.eval()
 
@@ -264,10 +277,14 @@ def train(config: VocaloFlowConfig) -> None:
                     writer.add_scalar("train/grad_scale", scaler.get_scale(), global_step)
 
                 grad_norms = {}
-                if hasattr(model, "plbert_proj") and model.plbert_proj.weight.grad is not None:
-                    grad_norms["train/grad_norm/plbert_proj"] = model.plbert_proj.weight.grad.norm().item()
-                if model.f0_embed.mlp[0].weight.grad is not None:
-                    grad_norms["train/grad_norm/f0_embed"] = model.f0_embed.mlp[0].weight.grad.norm().item()
+                _plbert = getattr(model, "plbert_proj", None) or getattr(
+                    getattr(model, "cond_encoder", None), "plbert_proj", None)
+                if _plbert is not None and _plbert.weight.grad is not None:
+                    grad_norms["train/grad_norm/plbert_proj"] = _plbert.weight.grad.norm().item()
+                _f0 = getattr(model, "f0_embed", None) or getattr(
+                    getattr(model, "cond_encoder", None), "f0_embed", None)
+                if _f0 is not None and _f0.mlp[0].weight.grad is not None:
+                    grad_norms["train/grad_norm/f0_embed"] = _f0.mlp[0].weight.grad.norm().item()
                 if model.input_proj.weight.grad is not None:
                     grad_norms["train/grad_norm/input_proj"] = model.input_proj.weight.grad.norm().item()
                 for k, v in grad_norms.items():

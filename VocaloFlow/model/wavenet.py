@@ -173,3 +173,92 @@ class WaveNetStack(nn.Module):
 
         # Channels-first → channels-last
         return out.transpose(1, 2)
+
+
+class WaveNetDenoiser(nn.Module):
+    """Pure WaveNet denoiser backbone for flow matching velocity prediction.
+
+    Unlike WaveNetStack (which projects skip-sum back to hidden_channels for
+    use as a pre-processing residual), this outputs directly to mel_channels
+    via the skip-sum path.  Designed to be the sole backbone (no DiT blocks).
+
+    Args:
+        residual_channels: Width of the residual stream (C).
+        cond_channels: Width of the timestep conditioning vector.
+        skip_channels: Width of accumulated skip connections.
+        mel_channels: Output dimension (128 for mel-spectrogram velocity).
+        kernel_size: Dilated conv kernel (odd).
+        n_layers: Number of residual blocks.
+        dilation_cycle: Dilation repeats every this many layers.
+        dropout: Dropout rate inside each residual block.
+    """
+
+    def __init__(
+        self,
+        residual_channels: int = 256,
+        cond_channels: int = 256,
+        skip_channels: int = 256,
+        mel_channels: int = 128,
+        kernel_size: int = 3,
+        n_layers: int = 20,
+        dilation_cycle: int = 10,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.residual_blocks = nn.ModuleList([
+            WaveNetResidualBlock(
+                channels=residual_channels,
+                cond_channels=cond_channels,
+                skip_channels=skip_channels,
+                kernel_size=kernel_size,
+                dilation=2 ** (i % dilation_cycle),
+                dropout=dropout,
+            )
+            for i in range(n_layers)
+        ])
+
+        self.output_conv1 = nn.Conv1d(skip_channels, skip_channels, kernel_size=1)
+        self.output_conv2 = nn.Conv1d(skip_channels, mel_channels, kernel_size=1)
+
+        _kaiming_init_conv(self.output_conv1)
+        # Zero-init final conv so the denoiser starts predicting near-zero
+        # velocity (identity behaviour), analogous to AdaLN-Zero in DiT.
+        nn.init.zeros_(self.output_conv2.weight)
+        nn.init.zeros_(self.output_conv2.bias)
+
+    def forward(
+        self,
+        x: Tensor,
+        cond: Tensor,
+        padding_mask: Tensor | None = None,
+    ) -> Tensor:
+        """Run the WaveNet denoiser.
+
+        Args:
+            x:    (B, T, residual_channels) channels-last input.
+            cond: (B, cond_channels) timestep conditioning vector.
+            padding_mask: (B, T) bool, True = valid frame.
+
+        Returns:
+            (B, T, mel_channels) channels-last velocity prediction.
+        """
+        h = x.transpose(1, 2)                                    # (B, C, T)
+        cond = cond.unsqueeze(-1).expand(-1, -1, h.size(-1))     # (B, C_cond, T)
+
+        mask_cf = None
+        if padding_mask is not None:
+            mask_cf = padding_mask.unsqueeze(1).float()           # (B, 1, T)
+
+        skip_sum: Tensor | int = 0
+        for block in self.residual_blocks:
+            h, skip = block(h, cond)
+            if mask_cf is not None:
+                h = h * mask_cf
+                skip = skip * mask_cf
+            skip_sum = skip_sum + skip
+
+        out = F.relu(skip_sum)
+        out = F.relu(self.output_conv1(out))
+        out = self.output_conv2(out)
+
+        return out.transpose(1, 2)

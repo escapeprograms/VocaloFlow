@@ -7,9 +7,9 @@ from datetime import datetime
 from typing import Optional
 
 import torch
+import torch.nn as nn
 
 from configs.default import VocaloFlowConfig
-from model.vocaloflow import VocaloFlow
 
 
 def find_latest_checkpoint(checkpoint_dir: str) -> Optional[str]:
@@ -30,8 +30,8 @@ def find_latest_checkpoint(checkpoint_dir: str) -> Optional[str]:
 
 
 def save_checkpoint(
-    model: VocaloFlow,
-    ema_model: VocaloFlow,
+    model: nn.Module,
+    ema_model: nn.Module,
     optimizer: torch.optim.Optimizer,
     step: int,
     config: VocaloFlowConfig,

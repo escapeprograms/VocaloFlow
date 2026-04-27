@@ -1,6 +1,8 @@
 # VocaloFlow Model Memory Palace
 
-Neural network architecture for the VocaloFlow conditional flow matching model (v4 — optional ConvNeXt and/or WaveNet pre-processing, with blurred phoneme boundaries).
+Neural network architecture for the VocaloFlow conditional flow matching model. Two architecture variants selectable via `config.architecture`:
+- `"hybrid"` (default): Optional ConvNeXt/WaveNet pre-processing + DiT transformer backbone (`VocaloFlow` class).
+- `"wavenet_pure"`: Pure WaveNet denoiser with no self-attention (`VocaloFlowPureWaveNet` class).
 
 ## vocaloflow.py
 
@@ -73,6 +75,9 @@ Adds duration-proportional boundary blending. Near phoneme boundaries, produces 
 - Short phonemes get proportionally smaller blend windows
 - Toggled via `config.phoneme_blur_enabled`
 
+### `ConditioningEncoder(config)`
+Shared conditioning signal encoder used by `VocaloFlowPureWaveNet`. Encapsulates all embedding modules (phoneme, F0, voicing, PL-BERT), per-stream LayerNorms, and concatenation. Forward: `(x_t, prior_mel, f0, voicing, phoneme_ids, plbert_features?) -> (B, T, output_dim)`. Exposes `output_dim` attribute for downstream layers. Not used by `VocaloFlow` (which keeps its own inline conditioning code for checkpoint state_dict key compatibility).
+
 ## convnext.py
 
 ### `GlobalResponseNorm(dim)`
@@ -97,6 +102,18 @@ Single residual block. Pipeline: input dropout → dilated Conv1d(C→2C, same-p
 Input 1x1 → N residual blocks with cyclic dilations (`2 ** (i % dilation_cycle)`) → ReLU(skip_sum) → Conv1x1 → ReLU → Conv1x1 → output. Takes `(x: (B,T,C), cond: (B,C_cond))`, broadcasts cond across T, and returns `(B,T,C)`. Callers wrap with an outer residual `h = h + wavenet_stack(h, c)` so the DiT blocks see the raw projected input at init time. All Conv1d weights initialised Kaiming-normal (relu). Default 8 blocks at skip=512 ≈ 21.7M params.
 
 **Toggle**: `config.num_wavenet_blocks = 0` disables entirely (stack is `None`). Does not conflict with `num_convnext_blocks`.
+
+### `WaveNetDenoiser(residual_channels=256, cond_channels=256, skip_channels=256, mel_channels=128, kernel_size=3, n_layers=20, dilation_cycle=10, dropout=0.1)`
+Pure WaveNet backbone for `VocaloFlowPureWaveNet`. Unlike `WaveNetStack` (which projects skip-sum back to `hidden_channels` for outer-residual use), this outputs directly to `mel_channels` via skip-sum. No `input_conv` (input projection lives in the model class). Reuses `WaveNetResidualBlock` unchanged. Applies padding mask after each block to prevent dilated conv artifacts at padded positions. Final `output_conv2` is **zero-initialized** so the denoiser starts predicting near-zero velocity (identity behaviour, analogous to AdaLN-Zero in DiT). Default 20 layers with dilation cycle 10 → dilations [1,2,4,8,16,32,64,128,256,512] x 2 cycles. ~13M params at 256 channels.
+
+## vocaloflow_wavenet.py
+
+### `VocaloFlowPureWaveNet(config: VocaloFlowConfig)`
+Pure WaveNet model for Exp 10 ablation. Same forward signature as `VocaloFlow` for drop-in compatibility. Selected via `config.architecture = "wavenet_pure"`.
+
+**Architecture**: ConditioningEncoder → Linear(input_dim, 256) → TimestepMLP(hidden_dim=256, sinusoidal_dim=128) → WaveNetDenoiser → (B,T,128) velocity. No DiT blocks, no self-attention, no RoPE, no AdaLN-Zero, no ConvNeXt. Optional speaker embedding (additive to timestep cond, zero-init). ~14M params total.
+
+**Config fields**: `wavenet_pure_residual_channels`, `wavenet_pure_num_layers`, `wavenet_pure_dilation_cycle`, `wavenet_pure_skip_channels`, `wavenet_pure_kernel_size`, `wavenet_pure_dropout`. All conditioning config (PL-BERT, phoneme blur, voicing embed dim, speaker embedding) is shared with the hybrid model.
 
 ## rope.py
 

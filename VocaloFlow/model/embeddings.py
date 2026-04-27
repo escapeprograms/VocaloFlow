@@ -260,3 +260,89 @@ class BlurredPhonemeEmbedding(PhonemeEmbedding):
         neighbor_emb = self.embedding(neighbor_ids)  # (B, T, D)
         w = blend_weights.unsqueeze(-1)  # (B, T, 1)
         return (1.0 - w) * emb + w * neighbor_emb
+
+
+class ConditioningEncoder(nn.Module):
+    """Shared conditioning signal encoder for VocaloFlow architectures.
+
+    Embeds and normalizes all conditioning inputs (phonemes, F0, voicing,
+    x_t, prior_mel) and concatenates them into a single feature tensor.
+    Used by VocaloFlowPureWaveNet; VocaloFlow keeps its own inline copy
+    to preserve checkpoint state_dict key compatibility.
+
+    Args:
+        config: VocaloFlowConfig with all hyperparameters.
+    """
+
+    def __init__(self, config) -> None:
+        super().__init__()
+        self.use_plbert = config.use_plbert
+        self.voicing_embed_dim = config.voicing_embed_dim
+
+        if config.use_plbert:
+            self.plbert_proj = nn.Linear(config.plbert_feature_dim, config.plbert_proj_dim)
+
+        if config.phoneme_blur_enabled:
+            self.phoneme_embed = BlurredPhonemeEmbedding(
+                vocab_size=config.phoneme_vocab_size,
+                embed_dim=config.phoneme_embed_dim,
+                blend_fraction=config.phoneme_blend_fraction,
+            )
+        else:
+            self.phoneme_embed = PhonemeEmbedding(
+                vocab_size=config.phoneme_vocab_size,
+                embed_dim=config.phoneme_embed_dim,
+            )
+
+        self.f0_embed = F0Embedding(embed_dim=config.f0_embed_dim)
+
+        if config.voicing_embed_dim > 1:
+            self.voicing_embed = VoicingEmbedding(embed_dim=config.voicing_embed_dim)
+            self.norm_voicing = nn.LayerNorm(config.voicing_embed_dim)
+
+        self.norm_xt = nn.LayerNorm(config.mel_channels)
+        self.norm_prior = nn.LayerNorm(config.mel_channels)
+        self.norm_f0 = nn.LayerNorm(config.f0_embed_dim)
+        self.norm_ph = nn.LayerNorm(config.phoneme_embed_dim)
+
+        self.output_dim = (
+            config.mel_channels * 2
+            + config.f0_embed_dim
+            + config.phoneme_embed_dim
+            + config.voicing_embed_dim
+        )
+
+    def forward(
+        self,
+        x_t: Tensor,
+        prior_mel: Tensor,
+        f0: Tensor,
+        voicing: Tensor,
+        phoneme_ids: Tensor,
+        plbert_features: Tensor | None = None,
+    ) -> Tensor:
+        """Encode all conditioning signals into a concatenated tensor.
+
+        Returns:
+            (B, T, output_dim) concatenated conditioning features.
+        """
+        if self.use_plbert and plbert_features is not None:
+            ph_emb = self.plbert_proj(plbert_features)
+        else:
+            ph_emb = self.phoneme_embed(phoneme_ids)
+
+        f0_emb = self.f0_embed(f0)
+
+        x_t_normed = self.norm_xt(x_t)
+        prior_normed = self.norm_prior(prior_mel)
+        f0_normed = self.norm_f0(f0_emb)
+        ph_normed = self.norm_ph(ph_emb)
+
+        if self.voicing_embed_dim > 1:
+            voicing_emb = self.norm_voicing(self.voicing_embed(voicing))
+        else:
+            voicing_emb = voicing.unsqueeze(-1)
+
+        return torch.cat([
+            x_t_normed, prior_normed, f0_normed, ph_normed, voicing_emb,
+        ], dim=-1)

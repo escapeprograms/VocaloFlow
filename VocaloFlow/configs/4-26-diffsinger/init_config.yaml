@@ -1,0 +1,30 @@
+# Experiment 10: Pure WaveNet Denoiser (no self-attention)
+# Launch: python -m training.train --name exp10_wavenet --config configs/exp10_wavenet/config.yaml
+
+# Architecture
+architecture: wavenet_pure
+wavenet_pure_residual_channels: 256
+wavenet_pure_num_layers: 20
+wavenet_pure_dilation_cycle: 10
+wavenet_pure_skip_channels: 256
+wavenet_pure_kernel_size: 3
+wavenet_pure_dropout: 0.1
+
+# Conditioning (match Exp 9 for fair comparison)
+voicing_embed_dim: 32
+use_plbert: true
+use_speaker_embedding: false
+
+# Energy-balanced loss (match Exp 9)
+energy_balanced_loss: true
+energy_balance_lambda: 0.7
+energy_balance_mode: both
+
+# Training (from scratch — higher LR and longer warmup)
+learning_rate: 0.0002
+warmup_steps: 4000
+total_steps: 150000
+save_every: 5000
+
+# Mixed precision
+use_amp: true
