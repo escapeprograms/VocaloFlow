@@ -179,14 +179,17 @@ class WaveNetDenoiser(nn.Module):
     """Pure WaveNet denoiser backbone for flow matching velocity prediction.
 
     Unlike WaveNetStack (which projects skip-sum back to hidden_channels for
-    use as a pre-processing residual), this outputs directly to mel_channels
-    via the skip-sum path.  Designed to be the sole backbone (no DiT blocks).
+    use as a pre-processing residual), this outputs via the skip-sum path.
+    Can serve as the sole backbone or feed into downstream refinement blocks.
 
     Args:
         residual_channels: Width of the residual stream (C).
         cond_channels: Width of the timestep conditioning vector.
         skip_channels: Width of accumulated skip connections.
-        mel_channels: Output dimension (128 for mel-spectrogram velocity).
+        mel_channels: Default output dimension (128 for mel-spectrogram velocity).
+        output_channels: Override output width. When ``None`` (default), outputs
+            to ``mel_channels``. Set to ``residual_channels`` when followed by
+            DiT refinement blocks.
         kernel_size: Dilated conv kernel (odd).
         n_layers: Number of residual blocks.
         dilation_cycle: Dilation repeats every this many layers.
@@ -199,12 +202,15 @@ class WaveNetDenoiser(nn.Module):
         cond_channels: int = 256,
         skip_channels: int = 256,
         mel_channels: int = 128,
+        output_channels: int | None = None,
         kernel_size: int = 3,
         n_layers: int = 20,
         dilation_cycle: int = 10,
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
+        out_ch = output_channels if output_channels is not None else mel_channels
+
         self.residual_blocks = nn.ModuleList([
             WaveNetResidualBlock(
                 channels=residual_channels,
@@ -218,7 +224,7 @@ class WaveNetDenoiser(nn.Module):
         ])
 
         self.output_conv1 = nn.Conv1d(skip_channels, skip_channels, kernel_size=1)
-        self.output_conv2 = nn.Conv1d(skip_channels, mel_channels, kernel_size=1)
+        self.output_conv2 = nn.Conv1d(skip_channels, out_ch, kernel_size=1)
 
         _kaiming_init_conv(self.output_conv1)
         # Zero-init final conv so the denoiser starts predicting near-zero

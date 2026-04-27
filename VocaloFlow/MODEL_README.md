@@ -72,6 +72,8 @@ A single tensor of shape `(B, T, 128)`, float32 — the predicted **velocity fie
 
 VocaloFlow is a **6-layer Diffusion Transformer (DiT)** with **optional ConvNeXt and/or WaveNet pre-processing blocks**, rotary position embeddings, AdaLN-Zero conditioning, per-stream input normalization, and **blurred phoneme boundary embeddings**. Parameter counts by configuration: ~29.2M baseline (DiT + embeddings only), ~37.6M with 4 ConvNeXt blocks, ~51.0M with 8 WaveNet blocks. Both pre-processors can be independently toggled; they are not mutually exclusive.
 
+A second architecture variant (`architecture="wavenet_pure"`) uses a **WaveNet denoiser backbone with optional DiT refinement blocks**. When `wavenet_pure_num_dit_blocks=0`, the model is a pure WaveNet with no self-attention (~14M at 256ch). When >0, DiT blocks refine the WaveNet output with global attention (~37M at 384ch + 3 DiT). Unlike the hybrid model's additive WaveNet pre-processing (`h = h + wavenet(h,c)`), here the WaveNet IS the primary backbone and DiT blocks operate on its output directly.
+
 ### 5.1 Key dimensions
 
 | Hyperparameter         | Value | Notes                                           |

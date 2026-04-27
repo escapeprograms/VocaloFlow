@@ -133,11 +133,12 @@ python -m inference.pipeline
     --save-mels
     --num-ode-steps 4
 
+-----
 python -m inference.pipeline 
     --ustx "../demo/let_it_go/let_it_go.ustx" 
     --prior-wav "../demo/let_it_go/prior_let_it_go.wav" 
-    --checkpoint "checkpoints/4-25-big/checkpoint_105000.pt"
-    --output "../demo/let_it_go/4-25-big/105000/output.wav"
+    --checkpoint "checkpoints/4-26-diffsinger/checkpoint_150000.pt"
+    --output "../demo/let_it_go/4-26-diffsinger/150000/output.wav"
     --save-mels
     --num-ode-steps 16
 
@@ -151,8 +152,8 @@ python -m inference.pipeline
 python -m inference.pipeline 
     --ustx "../demo/thinking_miku/thinking_miku.ustx" 
     --prior-wav "../demo/thinking_miku/output_prior.wav" 
-    --checkpoint "checkpoints/4-25-big/checkpoint_105000.pt" 
-    --output "../demo/thinking_miku/4-25-big/output.wav"
+    --checkpoint "checkpoints/4-26-diffsinger/checkpoint_150000.pt" 
+    --output "../demo/thinking_miku/4-26-diffsinger/150000/output.wav"
     --save-mels
     --num-ode-steps 16
 

@@ -277,12 +277,10 @@ def train(config: VocaloFlowConfig) -> None:
                     writer.add_scalar("train/grad_scale", scaler.get_scale(), global_step)
 
                 grad_norms = {}
-                _plbert = getattr(model, "plbert_proj", None) or getattr(
-                    getattr(model, "cond_encoder", None), "plbert_proj", None)
+                _plbert = getattr(model, "plbert_proj", None)
                 if _plbert is not None and _plbert.weight.grad is not None:
                     grad_norms["train/grad_norm/plbert_proj"] = _plbert.weight.grad.norm().item()
-                _f0 = getattr(model, "f0_embed", None) or getattr(
-                    getattr(model, "cond_encoder", None), "f0_embed", None)
+                _f0 = getattr(model, "f0_embed", None)
                 if _f0 is not None and _f0.mlp[0].weight.grad is not None:
                     grad_norms["train/grad_norm/f0_embed"] = _f0.mlp[0].weight.grad.norm().item()
                 if model.input_proj.weight.grad is not None:

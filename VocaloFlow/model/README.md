@@ -2,7 +2,7 @@
 
 Neural network architecture for the VocaloFlow conditional flow matching model. Two architecture variants selectable via `config.architecture`:
 - `"hybrid"` (default): Optional ConvNeXt/WaveNet pre-processing + DiT transformer backbone (`VocaloFlow` class).
-- `"wavenet_pure"`: Pure WaveNet denoiser with no self-attention (`VocaloFlowPureWaveNet` class).
+- `"wavenet_pure"`: WaveNet denoiser backbone with optional DiT refinement blocks (`VocaloFlowPureWaveNet` class). When `wavenet_pure_num_dit_blocks=0`, pure WaveNet with no self-attention. When >0, WaveNet backbone + DiT refinement.
 
 ## vocaloflow.py
 
@@ -75,8 +75,8 @@ Adds duration-proportional boundary blending. Near phoneme boundaries, produces 
 - Short phonemes get proportionally smaller blend windows
 - Toggled via `config.phoneme_blur_enabled`
 
-### `ConditioningEncoder(config)`
-Shared conditioning signal encoder used by `VocaloFlowPureWaveNet`. Encapsulates all embedding modules (phoneme, F0, voicing, PL-BERT), per-stream LayerNorms, and concatenation. Forward: `(x_t, prior_mel, f0, voicing, phoneme_ids, plbert_features?) -> (B, T, output_dim)`. Exposes `output_dim` attribute for downstream layers. Not used by `VocaloFlow` (which keeps its own inline conditioning code for checkpoint state_dict key compatibility).
+### `ConditioningEncoder(config)` [DEPRECATED]
+Previously used by `VocaloFlowPureWaveNet`, now deprecated. Both model classes use inline conditioning. Retained for backward compatibility with old checkpoints that have `cond_encoder.*` state_dict keys.
 
 ## convnext.py
 
@@ -103,17 +103,25 @@ Input 1x1 → N residual blocks with cyclic dilations (`2 ** (i % dilation_cycle
 
 **Toggle**: `config.num_wavenet_blocks = 0` disables entirely (stack is `None`). Does not conflict with `num_convnext_blocks`.
 
-### `WaveNetDenoiser(residual_channels=256, cond_channels=256, skip_channels=256, mel_channels=128, kernel_size=3, n_layers=20, dilation_cycle=10, dropout=0.1)`
-Pure WaveNet backbone for `VocaloFlowPureWaveNet`. Unlike `WaveNetStack` (which projects skip-sum back to `hidden_channels` for outer-residual use), this outputs directly to `mel_channels` via skip-sum. No `input_conv` (input projection lives in the model class). Reuses `WaveNetResidualBlock` unchanged. Applies padding mask after each block to prevent dilated conv artifacts at padded positions. Final `output_conv2` is **zero-initialized** so the denoiser starts predicting near-zero velocity (identity behaviour, analogous to AdaLN-Zero in DiT). Default 20 layers with dilation cycle 10 → dilations [1,2,4,8,16,32,64,128,256,512] x 2 cycles. ~13M params at 256 channels.
+### `WaveNetDenoiser(residual_channels=256, cond_channels=256, skip_channels=256, mel_channels=128, output_channels=None, kernel_size=3, n_layers=20, dilation_cycle=10, dropout=0.1)`
+WaveNet backbone for `VocaloFlowPureWaveNet`. Unlike `WaveNetStack` (which projects skip-sum back to `hidden_channels` for outer-residual use), this outputs via skip-sum to a configurable width. No `input_conv` (input projection lives in the model class). Reuses `WaveNetResidualBlock` unchanged. Applies padding mask after each block to prevent dilated conv artifacts at padded positions. Final `output_conv2` is **zero-initialized** so the denoiser starts predicting near-zero velocity (identity behaviour, analogous to AdaLN-Zero in DiT). Default 20 layers with dilation cycle 10 → dilations [1,2,4,8,16,32,64,128,256,512] x 2 cycles. ~13M params at 256 channels, ~22M at 384 channels.
+
+**`output_channels`**: When `None` (default), outputs to `mel_channels` (128) for standalone use. When set to `residual_channels`, outputs at the WaveNet's internal width for downstream DiT blocks.
 
 ## vocaloflow_wavenet.py
 
 ### `VocaloFlowPureWaveNet(config: VocaloFlowConfig)`
-Pure WaveNet model for Exp 10 ablation. Same forward signature as `VocaloFlow` for drop-in compatibility. Selected via `config.architecture = "wavenet_pure"`.
+WaveNet-based model with optional DiT refinement. Same forward signature as `VocaloFlow` for drop-in compatibility. Selected via `config.architecture = "wavenet_pure"`.
 
-**Architecture**: ConditioningEncoder → Linear(input_dim, 256) → TimestepMLP(hidden_dim=256, sinusoidal_dim=128) → WaveNetDenoiser → (B,T,128) velocity. No DiT blocks, no self-attention, no RoPE, no AdaLN-Zero, no ConvNeXt. Optional speaker embedding (additive to timestep cond, zero-init). ~14M params total.
+**Architecture**: Inline conditioning (phoneme/F0/voicing/normalization/concat, mirroring VocaloFlow) → Linear(input_dim, rc) → TimestepMLP(hidden_dim=rc) → WaveNetDenoiser → optional DiT blocks → output. When `wavenet_pure_num_dit_blocks=0`: WaveNetDenoiser outputs directly to mel_channels (128), pure WaveNet with no self-attention. When `wavenet_pure_num_dit_blocks > 0`: WaveNetDenoiser outputs to rc, followed by N DiT blocks (with RoPE, AdaLN-Zero), then LayerNorm → Linear(rc, 128). Optional speaker embedding (additive to timestep cond, zero-init).
 
-**Config fields**: `wavenet_pure_residual_channels`, `wavenet_pure_num_layers`, `wavenet_pure_dilation_cycle`, `wavenet_pure_skip_channels`, `wavenet_pure_kernel_size`, `wavenet_pure_dropout`. All conditioning config (PL-BERT, phoneme blur, voicing embed dim, speaker embedding) is shared with the hybrid model.
+**No outer residual on WaveNet**: Unlike the hybrid model's `h = h + wavenet_stack(h, c)` (where WaveNet is additive pre-processing), here the WaveNet IS the primary backbone. DiT blocks refine the WaveNet output directly.
+
+**State_dict keys**: Uses inline conditioning (direct attributes like `phoneme_embed.*`, `f0_embed.*`, `norm_xt.*`), matching VocaloFlow's pattern.
+
+**Config fields**: `wavenet_pure_residual_channels`, `wavenet_pure_num_layers`, `wavenet_pure_dilation_cycle`, `wavenet_pure_skip_channels`, `wavenet_pure_kernel_size`, `wavenet_pure_dropout`, `wavenet_pure_num_dit_blocks`. DiT blocks reuse shared fields: `num_heads`, `ffn_dim`, `max_seq_len`, `dropout`. All conditioning config (PL-BERT, phoneme blur, voicing embed dim, speaker embedding) is shared with the hybrid model.
+
+**Param estimates**: ~14M (256ch, no DiT), ~22M (384ch, no DiT), ~37M (384ch, 3 DiT blocks with heads=6, ffn=1536).
 
 ## rope.py
 

@@ -66,6 +66,7 @@ class VocaloFlowConfig:
     wavenet_pure_skip_channels: int = 256
     wavenet_pure_kernel_size: int = 3
     wavenet_pure_dropout: float = 0.1
+    wavenet_pure_num_dit_blocks: int = 0   # DiT refinement blocks after WaveNet (0 = pure WaveNet)
 
     # ── Training ──────────────���───────────────────────────────────────────
     batch_size: int = 32

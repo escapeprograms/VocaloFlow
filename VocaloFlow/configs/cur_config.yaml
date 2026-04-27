@@ -1,27 +1,35 @@
-num_dit_blocks: 10
-num_convnext_blocks: 0
+# Experiment: WaveNet + DiT (384ch, 20 WaveNet + 3 DiT)
+# Launch: python -m training.train --name exp_wavenet_dit --config configs/cur_config.yaml
 
-num_wavenet_blocks: 12
-wavenet_kernel_size: 3
-wavenet_dilation_cycle: 4
-wavenet_skip_channels: 512
-wavenet_dropout: 0.10
+# Architecture
+architecture: wavenet_pure
+wavenet_pure_residual_channels: 384
+wavenet_pure_num_layers: 20
+wavenet_pure_dilation_cycle: 10
+wavenet_pure_skip_channels: 256
+wavenet_pure_kernel_size: 3
+wavenet_pure_dropout: 0.1
+wavenet_pure_num_dit_blocks: 3
 
-phoneme_blur_enabled: false
-phoneme_blend_fraction: 0.2
+# DiT config
+num_heads: 6
+ffn_dim: 1536
 
-use_plbert: true
+# Conditioning (match Exp 9 for fair comparison)
 voicing_embed_dim: 32
-
-# Generator speaker embedding
+use_plbert: true
 use_speaker_embedding: false
-speaker_embedding_dim: 192
-global_speaker_embedding_path: "../SpeakerEmbedding/embeddings/Rachie/speaker_embedding.pt"
 
-# Energy-balanced loss
+# Energy-balanced loss (match Exp 9)
 energy_balanced_loss: true
 energy_balance_lambda: 0.7
 energy_balance_mode: both
+
+# Training (from scratch — higher LR and longer warmup)
+learning_rate: 0.0002
+warmup_steps: 4000
+total_steps: 150000
+save_every: 5000
 
 # Mixed precision
 use_amp: true

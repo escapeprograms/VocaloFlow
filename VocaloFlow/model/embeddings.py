@@ -263,12 +263,12 @@ class BlurredPhonemeEmbedding(PhonemeEmbedding):
 
 
 class ConditioningEncoder(nn.Module):
-    """Shared conditioning signal encoder for VocaloFlow architectures.
+    """[DEPRECATED] Shared conditioning signal encoder.
 
-    Embeds and normalizes all conditioning inputs (phonemes, F0, voicing,
-    x_t, prior_mel) and concatenates them into a single feature tensor.
-    Used by VocaloFlowPureWaveNet; VocaloFlow keeps its own inline copy
-    to preserve checkpoint state_dict key compatibility.
+    No longer used by VocaloFlowPureWaveNet (which switched to inline
+    conditioning to mirror VocaloFlow's pattern). Retained for backward
+    compatibility with old checkpoints that have ``cond_encoder.*``
+    state_dict keys.
 
     Args:
         config: VocaloFlowConfig with all hyperparameters.
