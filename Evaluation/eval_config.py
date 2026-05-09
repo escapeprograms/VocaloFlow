@@ -27,9 +27,9 @@ class EvalConfig:
     rvc_audio_dir: str = ""
 
     # -- Inference ---------------------------------------------------------
-    num_ode_steps: int = 32
+    num_ode_steps: int = 16
     ode_method: str = "midpoint"
-    cfg_scale: float = 2.0
+    cfg_scale: float = 1.0
     chunk_size: int = 256
     overlap: int = 16
 

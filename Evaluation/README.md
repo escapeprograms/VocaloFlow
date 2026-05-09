@@ -42,10 +42,10 @@ conda activate vocaloflow-eval
 cd Evaluation
 
 # Both contexts (quality + controllability) with RVC baseline
-python run_eval.py \
-    --checkpoint ../VocaloFlow/checkpoints/4-27-wn/checkpoint_150000.pt \
-    --rvc-audio-dir ../RVCBaseline/output \
-    --eval-context both \
+python run_eval.py 
+    --checkpoint ../VocaloFlow/checkpoints/4-27-wn/checkpoint_150000.pt 
+    --rvc-audio-dir ../RVCBaseline/output 
+    --eval-context both 
     --max-eval-chunks 50
 
 # Quick smoke test (skip heavy Whisper/MOS models)

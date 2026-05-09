@@ -48,12 +48,6 @@ from model.vocaloflow_wavenet import VocaloFlowWaveNet
 from inference.inference import sample_ode
 from utils.resample import resample_1d, resample_2d, resolve_phoneme_indirection
 
-_vocoders_mod = import_from_path(
-    "eval_vocoders",
-    os.path.join(DATASYNTHESIZER_DIR, "utils", "vocoders.py"),
-)
-invert_mel_to_audio_soulxsinger = _vocoders_mod.invert_mel_to_audio_soulxsinger
-
 SR = 24000
 HOP = 480
 
@@ -168,13 +162,6 @@ def infer_chunked(
     return output_mel
 
 
-def mel_to_wav(mel: np.ndarray) -> np.ndarray:
-    """Convert (T, 128) normalized log-mel to audio at 24 kHz via SoulX Vocos."""
-    mel_transposed = mel.T.astype(np.float32)  # (128, T)
-    audio = invert_mel_to_audio_soulxsinger(mel_transposed, config={})
-    return audio
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Data loading (per-chunk, full length — no cropping to max_seq_len)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -238,7 +225,7 @@ def _load_speaker_embedding(
     """Load global speaker embedding if the checkpoint config requires it."""
     if not config.speaker_embedding_path or not os.path.exists(config.speaker_embedding_path):
         return None
-    return torch.load(config.speaker_embedding_path, weights_only=True).float().to(device)
+    return torch.load(config.speaker_embedding_path, weights_only=True).float().unsqueeze(0).to(device)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -459,9 +446,9 @@ def _eval_controllability(
 ) -> dict | None:
     """Run Context 2 (controllability) evaluation for a single chunk.
 
-    Loads pre-generated DALI USTX + prior WAV, extracts conditioning
-    (F0, voicing, phonemes) from USTX note pitches — not from SoulX audio —
-    and runs VF inference for a fair comparison against the DALI score.
+    Loads pre-generated DALI USTX + prior WAV, extracts voicing and phonemes
+    from USTX notes, and uses DALI ground-truth F0 as the pitch conditioning.
+    Runs VF inference and compares the output F0 against the same DALI reference.
     """
     from eval_utils.dali_ref import (
         extract_dali_f0_reference,
@@ -492,36 +479,48 @@ def _eval_controllability(
     except (IndexError, ValueError):
         return None
 
-    # ── Extract conditioning from USTX (F0 from note pitches) ────────
+    # ── Parse USTX and extract prior mel ────────────────────────────
     pipe = _get_pipeline_mod()
     notes_data = pipe.parse_ustx(ustx_path)
     prior_mel = pipe.extract_prior_mel(wav_path)
     T = prior_mel.shape[0]
 
-    f0, voicing, phoneme_ids = pipe._extract_conditioning_ustx(
-        notes_data, T, config.phoneset_path,
+    # ── Extract conditioning: voicing + phonemes from USTX notes,
+    #    F0 from DALI ground-truth annotations ────────────────────────
+    voicing = pipe.get_note_coverage_voicing(notes_data, T)
+    phoneme_ids = pipe.build_phoneme_ids(
+        notes_data["notes"], notes_data["ms_per_tick"], T,
+        config.phoneset_path,
     )
-
     dali_f0 = extract_dali_f0_reference(
         dali_entry, chunk_start, chunk_end, T, config.sr, config.hop,
     )
 
-    # ── VocaloFlow inference with DALI-derived conditioning ──────────
+    # ── PL-BERT features (conditional) ──────────────────────────────
     plbert_features = None
     uses_plbert = getattr(model, "config", None) and getattr(model.config, "use_plbert", False)
     if uses_plbert:
         try:
             plbert_features = pipe.build_plbert_frame_features(
                 notes_data["notes"], notes_data["ms_per_tick"], T,
-                config.phoneset_path,
+                config.phoneset_path, device=str(device),
             )
-        except Exception:
-            pass
+        except (ModuleNotFoundError, ImportError) as e:
+            print(f"  PL-BERT live extraction failed ({e}), attempting precomputed fallback...")
+            sx_plbert = arrays.get("plbert_features")
+            if sx_plbert is not None:
+                plbert_features = resample_2d(
+                    torch.from_numpy(sx_plbert), T, mode="nearest",
+                ).numpy().astype(np.float32)
+                print(f"  PL-BERT fallback: resampled to {plbert_features.shape}")
+            else:
+                print("  WARNING: No precomputed PL-BERT features available, skipping")
 
+    # ── VocaloFlow inference with DALI F0 conditioning ──────────────
     pred_mel = infer_chunked(
         model,
         prior_mel,
-        f0,
+        dali_f0,
         voicing,
         phoneme_ids,
         chunk_size=config.chunk_size,
