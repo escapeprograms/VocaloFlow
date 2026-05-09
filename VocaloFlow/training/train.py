@@ -16,8 +16,8 @@ from torch.utils.tensorboard import SummaryWriter
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from configs.default import VocaloFlowConfig
-from model.vocaloflow import VocaloFlow
-from model.vocaloflow_wavenet import VocaloFlowPureWaveNet
+from model.vocaloflow_hybrid import VocaloFlowHybrid
+from model.vocaloflow_wavenet import VocaloFlowWaveNet
 from training.checkpoint import find_latest_checkpoint, load_checkpoint, save_checkpoint
 from training.energy_balance import EnergyBalancedWeight
 from training.flow_matching import FlowMatchingLoss
@@ -31,9 +31,9 @@ from utils.collate import vocaloflow_collate_fn, validate_batch_signals
 def build_model(config: VocaloFlowConfig) -> torch.nn.Module:
     """Instantiate the correct model class based on config.architecture."""
     if config.architecture == "wavenet_pure":
-        return VocaloFlowPureWaveNet(config)
+        return VocaloFlowWaveNet(config)
     if config.architecture == "hybrid":
-        return VocaloFlow(config)
+        return VocaloFlowHybrid(config)
     raise ValueError(
         f"Unknown architecture: {config.architecture!r}. "
         f"Expected 'hybrid' or 'wavenet_pure'."
@@ -329,7 +329,7 @@ def train(config: VocaloFlowConfig) -> None:
 
 @torch.no_grad()
 def validate(
-    model: VocaloFlow,
+    model: torch.nn.Module,
     val_loader: DataLoader,
     criterion: FlowMatchingLoss,
     device: torch.device,

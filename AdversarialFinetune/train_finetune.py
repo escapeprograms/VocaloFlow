@@ -45,7 +45,7 @@ setup_vocaloflow_sys_path()
 
 # VocaloFlow imports — resolve via sys.path.
 from configs.default import VocaloFlowConfig          # noqa: E402
-from model.vocaloflow import VocaloFlow               # noqa: E402
+from model.vocaloflow_hybrid import VocaloFlowHybrid as VocaloFlow  # noqa: E402
 from utils.config_utils import rebuild_dataclass_tolerant  # noqa: E402
 from utils.dataset import VocaloFlowDataset           # noqa: E402
 from utils.collate import vocaloflow_collate_fn, validate_batch_signals  # noqa: E402

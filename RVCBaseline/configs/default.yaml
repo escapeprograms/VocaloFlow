@@ -1,0 +1,31 @@
+# RVC Baseline — Default Configuration
+#
+# Data-selection fields MUST match EvalConfig defaults so that
+# run_inference.py and run_eval.py operate on the same validation set.
+
+# -- Data (must match EvalConfig) ------------------------------------------
+data_dir: "../Data/Rachie"
+manifest_path: "../Data/Rachie/manifest.csv"
+max_dtw_cost: 100.0
+val_fraction: 0.05
+seed: 42
+
+# -- Training data prep ----------------------------------------------------
+max_training_chunks: 1000
+training_data_dir: "./training_data"
+
+# -- RVC training -----------------------------------------------------------
+rvc_model_name: "Rachie-RVC"
+rvc_epochs: 300
+rvc_sample_rate: 40000
+f0_method: "rmvpe"
+
+# -- Inference ---------------------------------------------------------------
+max_eval_chunks: 0
+output_dir: "./output"
+index_ratio: 0.0
+f0_shift: 0
+
+# -- Model paths (set after training) ----------------------------------------
+rvc_model_path: ""
+rvc_index_path: ""

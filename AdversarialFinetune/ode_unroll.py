@@ -137,7 +137,7 @@ if __name__ == "__main__":
     sys.path.insert(0, os.path.join(_REPO, "VocaloFlow"))
 
     from configs.default import VocaloFlowConfig      # noqa: E402
-    from model.vocaloflow import VocaloFlow            # noqa: E402
+    from model.vocaloflow_hybrid import VocaloFlowHybrid as VocaloFlow  # noqa: E402
     from inference.inference import sample_ode         # noqa: E402
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

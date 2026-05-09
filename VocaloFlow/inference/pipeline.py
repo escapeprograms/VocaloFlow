@@ -46,8 +46,8 @@ for _p in [_VOCALOFLOW_DIR, _SOULX_DIR]:
 
 # VocaloFlow imports
 from configs.default import VocaloFlowConfig
-from model.vocaloflow import VocaloFlow
-from model.vocaloflow_wavenet import VocaloFlowPureWaveNet
+from model.vocaloflow_hybrid import VocaloFlowHybrid
+from model.vocaloflow_wavenet import VocaloFlowWaveNet
 from inference.inference import sample_ode
 from utils.resample import resample_1d, resample_2d, resolve_phoneme_indirection
 
@@ -554,9 +554,9 @@ def load_model(checkpoint_path: str, device: torch.device) -> torch.nn.Module:
     config = ckpt.get("config", VocaloFlowConfig())
     arch = getattr(config, "architecture", "hybrid")
     if arch == "wavenet_pure":
-        model = VocaloFlowPureWaveNet(config).to(device)
+        model = VocaloFlowWaveNet(config).to(device)
     else:
-        model = VocaloFlow(config).to(device)
+        model = VocaloFlowHybrid(config).to(device)
 
     state_key = "ema_model_state_dict" if "ema_model_state_dict" in ckpt else "model_state_dict"
     missing, unexpected = model.load_state_dict(ckpt[state_key], strict=False)

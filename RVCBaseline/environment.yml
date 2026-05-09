@@ -1,0 +1,48 @@
+name: rvc
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+    # PyTorch + CUDA from PyTorch index
+    - --extra-index-url https://download.pytorch.org/whl/cu128
+    - torch==2.7.1+cu128
+    - torchaudio==2.7.1+cu128
+    - torchvision==0.22.1+cu128
+    # Applio core dependencies
+    - numpy==2.4.4
+    - faiss-cpu==1.13.2
+    - librosa==0.11.0
+    - scipy==1.17.1
+    - soundfile==0.13.1
+    - noisereduce
+    - pedalboard
+    - stftpitchshift
+    - soxr
+    - torchcrepe
+    - torchfcpe
+    - einops
+    - transformers==5.4.0
+    - omegaconf>=2.0.6
+    - numba==0.65.0
+    - matplotlib==3.10.8
+    - tensorboard
+    - tensorboardX
+    - gradio==5.50.0
+    - edge-tts==7.2.8
+    - ffmpeg-python>=0.2.0
+    - requests
+    - tqdm
+    - wget
+    - beautifulsoup4
+    - sounddevice
+    - webrtcvad-wheels
+    - psutil
+    - pypresence
+    - pyyaml
+    # RVCBaseline wrapper deps
+    - pandas

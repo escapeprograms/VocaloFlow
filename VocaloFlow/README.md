@@ -152,8 +152,8 @@ python -m inference.pipeline
 python -m inference.pipeline 
     --ustx "../demo/thinking_miku/thinking_miku.ustx" 
     --prior-wav "../demo/thinking_miku/output_prior.wav" 
-    --checkpoint "checkpoints/4-26-diffsinger/checkpoint_150000.pt" 
-    --output "../demo/thinking_miku/4-26-diffsinger/150000/output.wav"
+    --checkpoint "checkpoints/4-27-wn/checkpoint_150000.pt" 
+    --output "../demo/thinking_miku/4-27-wn/150000/output.wav"
     --save-mels
     --num-ode-steps 16
 

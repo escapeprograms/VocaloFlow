@@ -37,5 +37,14 @@ GEMINI.md
 #demos
 demo/
 
+# RVC baseline
+Applio/
+RVCBaseline/output/
+RVCBaseline/training_data/
+
+# Eval precompute
+Evaluation/scratch_output
+Evaluation/dali_ustx
+
 # other
 wandb.txt
