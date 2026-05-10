@@ -78,7 +78,10 @@ Evaluation/
 │   ├── mos.py                      # UTMOS MOS prediction
 │   ├── duration.py                 # Onset MAE (F0 onset detection + matching)
 │   └── contentvec.py               # ContentVec embedding analysis
-├── generate_dali_ustx.py               # CLI: pre-generate DALI USTX priors
+├── generate_dali_ustx.py           # CLI: pre-generate DALI USTX priors
+├── dataAnalysis/
+│   ├── README.md                   # Diagnostic scripts documentation
+│   └── F0_comparison.py            # DALI GT vs SoulX vs VF F0 overlay plot
 └── eval_utils/
     ├── __init__.py
     ├── imports.py                  # Cross-module import helpers
