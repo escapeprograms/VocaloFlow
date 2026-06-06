@@ -121,45 +121,39 @@ The pipeline uses two environments:
 
 ### 4a. Parent Environment (`vocaloflow-datasynthesizer`)
 
-This is the lightweight orchestration env. No torch, no GPU deps.
+This is the orchestration env. It is CPU-only (no CUDA), but it does include a CPU
+build of torch — `DataSynthesizer/utils/vocoders.py` uses it for mel<->audio.
 
 ```bash
 conda env create -f DataSynthesizer/environment.yml
 ```
 
-This creates `vocaloflow-datasynthesizer` with ~25 pip packages (librosa, numpy, pythonnet, g2p, DALI, etc.).
+This creates `vocaloflow-datasynthesizer` (~75 exactly-pinned pip packages: librosa, numpy, pythonnet, g2p, DALI, CPU torch, etc.).
 
 ### 4b. Subprocess Environment (`soulxsinger`)
 
 This is the GPU-heavy env for SoulX-Singer inference and RMVPE note extraction.
+Create it from the environment.yml, which reproduces the exact working env
+(CUDA 11.8 torch build + the transformers/tokenizers pins below) in one command:
 
 ```bash
-conda create -n soulxsinger -y python=3.10
-conda activate soulxsinger
-
-# Install SoulX-Singer deps
-pip install -r SoulX-Singer/requirements.txt
-
-# Fix torch: upstream requirements.txt installs CPU-only torch on Windows.
-# Replace with CUDA 11.8 build:
-pip install torch==2.2.0+cu118 torchaudio==2.2.0+cu118 \
-    --index-url https://download.pytorch.org/whl/cu118 \
-    --force-reinstall --no-deps
-
-# Fix transformers: upstream specifies >=4.53.0, but SoulX-Singer's model code
-# calls LlamaAttention.forward() without the `position_embeddings` arg added in 4.53.
-# Pin to the last compatible version:
-pip install transformers==4.42.4 tokenizers==0.19.1
-
-conda deactivate
+conda env create -f SoulX-Singer/environment.yml
 ```
+
+> **Why a dedicated `SoulX-Singer/environment.yml`?** It is our authoritative spec.
+> `SoulX-Singer/requirements.txt` is the **vendored upstream** list and is left untouched;
+> installing from it directly gives CPU-only torch + `transformers>=4.53.0` on Windows,
+> which breaks SoulX-Singer. The two load-bearing overrides baked into `environment.yml` are:
+> - **torch 2.2.0 + CUDA 11.8** (cu118 wheels) instead of upstream's CPU-only torch.
+> - **transformers==4.42.4 / tokenizers==0.19.1** — SoulX-Singer's model calls
+>   `LlamaAttention.forward()` without the `position_embeddings` arg added in transformers 4.53.
 
 ### Verify Both Environments
 
 ```bash
-# Parent env: should work, no torch
+# Parent env: imports work; torch is present but CPU-only (no CUDA)
 conda run -n vocaloflow-datasynthesizer python -c "import librosa, numpy, pythonnet; print('parent ok')"
-conda run -n vocaloflow-datasynthesizer python -c "import torch"  # Should fail with ModuleNotFoundError
+conda run -n vocaloflow-datasynthesizer python -c "import torch; print('cpu torch', torch.__version__)"  # 2.10.0+cpu
 
 # Subprocess env: should have torch + CUDA
 conda run -n soulxsinger python -c "import torch; print(torch.__version__, 'cuda:', torch.cuda.is_available())"
@@ -211,7 +205,11 @@ The pipeline is resumable per-chunk — each phase checks for sentinel files bef
 ## Troubleshooting
 
 ### `AssertionError: Torch not compiled with CUDA enabled`
-The `soulxsinger` env has CPU-only torch. Re-run the torch install with the `--index-url` flag from step 4b.
+The `soulxsinger` env has CPU-only torch. Recreate it from `SoulX-Singer/environment.yml`, or force-reinstall the CUDA build:
+```bash
+pip install torch==2.2.0+cu118 torchaudio==2.2.0+cu118 \
+    --index-url https://download.pytorch.org/whl/cu118 --force-reinstall --no-deps
+```
 
 ### `LlamaAttention.forward() missing 1 required positional argument: 'position_embeddings'`
 The `transformers` version is too new. Pin it: `pip install transformers==4.42.4 tokenizers==0.19.1`

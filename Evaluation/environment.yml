@@ -1,0 +1,92 @@
+# ============================================================================
+# Conda environment: vocaloflow-eval
+# Evaluation pipeline (Evaluation/run_eval.py and friends).
+#
+#   conda env create -f Evaluation/environment.yml
+#   conda activate vocaloflow-eval
+#
+# Python 3.11 | PyTorch 2.5.1 + CUDA 12.1 (cu121 wheels via the PyTorch index below).
+# Eval-only packages vs the base vocaloflow env: openai-whisper (WER), jiwer +
+# RapidFuzz (WER scoring), speechmos (MOS), tiktoken (whisper dep), torchvision.
+# NOTE: UTMOS and ContentVec/HuBERT are fetched at runtime via torch.hub and are
+# intentionally NOT pinned here.
+# Versions are exact pins captured from the working environment.
+# ============================================================================
+name: vocaloflow-eval
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11.15
+  - pip
+  - pip:
+    - --extra-index-url https://download.pytorch.org/whl/cu121
+    - audioread==3.1.0
+    - certifi==2026.4.22
+    - cffi==2.0.0
+    - charset-normalizer==3.4.7
+    - click==8.3.3
+    - colorama==0.4.6
+    - contourpy==1.3.3
+    - cycler==0.12.1
+    - DALI-dataset==1.1
+    - decorator==5.2.1
+    - Distance==0.1.3
+    - filelock==3.25.2
+    - fonttools==4.62.1
+    - fsspec==2026.2.0
+    - g2p-en==2.1.0
+    - g2pM==0.1.2.5
+    - idna==3.13
+    - inflect==7.5.0
+    - Jinja2==3.1.6
+    - jiwer==4.0.0
+    - joblib==1.5.3
+    - kiwisolver==1.5.0
+    - lazy-loader==0.5
+    - librosa==0.11.0
+    - llvmlite==0.47.0
+    - MarkupSafe==3.0.3
+    - matplotlib==3.10.9
+    - more-itertools==11.0.2
+    - mpmath==1.3.0
+    - msgpack==1.1.2
+    - networkx==3.6.1
+    - nltk==3.9.4
+    - numba==0.65.1
+    - numpy==2.4.3
+    - openai-whisper==20250625
+    - packaging==26.0
+    - pandas==3.0.2
+    - pillow==12.1.1
+    - pip==26.0.1
+    - platformdirs==4.9.6
+    - pooch==1.9.0
+    - pycparser==3.0
+    - pyparsing==3.3.2
+    - python-dateutil==2.9.0.post0
+    - PyYAML==6.0.3
+    - RapidFuzz==3.14.5
+    - regex==2026.4.4
+    - requests==2.33.1
+    - scikit-learn==1.8.0
+    - scipy==1.17.1
+    - setuptools==82.0.1
+    - six==1.17.0
+    - soundfile==0.13.1
+    - soxr==1.1.0
+    - speechmos==0.0.1.1
+    - sympy==1.13.1
+    - threadpoolctl==3.6.0
+    - tiktoken==0.12.0
+    - ToJyutping==3.2.0
+    - torch==2.5.1+cu121
+    - torchaudio==2.5.1+cu121
+    - torchvision==0.20.1+cu121
+    - tqdm==4.67.3
+    - typeguard==4.5.1
+    - typing_extensions==4.15.0
+    - tzdata==2026.2
+    - urllib3==2.7.0
+    - wheel==0.46.3
+    - youtube-dl==2021.12.17

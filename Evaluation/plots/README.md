@@ -8,8 +8,8 @@ Plots F0 curves from three sources on a single chart to diagnose pitch tracking:
 
 | Curve | Source | Color |
 |-------|--------|-------|
-| DALI GT F0 | Step-function from DALI note annotations (Hz) | Green |
-| SoulX target F0 | Pre-extracted `target_f0.npy` from SoulX preprocessing | Blue |
+| DALI GT F0 | Step-function from DALI note annotations (Hz) | Orange |
+| SoulX target F0 | Pre-extracted `target_f0.npy` from SoulX preprocessing | Cyan |
 | VocaloFlow F0 | RMVPE extraction from VF inference output | Red |
 
 The script automatically picks the first valid DALI USTX sample, runs VocaloFlow inference using DALI GT notes as F0 conditioning, and saves audio + plot.

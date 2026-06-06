@@ -8,7 +8,7 @@ all audio files, and plots F0 curves for comparison:
   - VocaloFlow F0 (RMVPE extraction from VF output audio)
 
 Usage (from the Evaluation/ folder):
-    python -m dataAnalysis.F0_comparison
+    python -m plots.F0_comparison
 """
 
 import os
@@ -73,6 +73,8 @@ SPEAKER_EMB_PATH = os.path.join(
     REPO_ROOT, "SpeakerEmbedding", "embeddings", "Rachie", "speaker_embedding.pt"
 )
 
+RANDOM_SEED = 50
+
 NUM_ODE_STEPS = 16
 ODE_METHOD = "midpoint"
 CFG_SCALE = 1.0
@@ -84,12 +86,11 @@ HOP = 480
 OUTPUT_DIR = os.path.join(_THIS_DIR, "f0_comparison_output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ── Pick a sample ──────────────────────────────────────────────────────
-print("Scanning for valid DALI USTX sample...")
-dali_id = None
-chunk_name = None
-ustx_path = None
-wav_path = None
+# ── Pick a random sample (change RANDOM_SEED to browse) ───────────────
+import random
+
+print("Scanning for valid DALI USTX samples...")
+valid_samples = []
 
 for _did in sorted(os.listdir(DALI_USTX_DIR)):
     id_dir = os.path.join(DALI_USTX_DIR, _did)
@@ -106,16 +107,14 @@ for _did in sorted(os.listdir(DALI_USTX_DIR)):
             info = sf.info(_wav)
             if info.frames == 0:
                 continue
-            dali_id = _did
-            chunk_name = _cn
-            ustx_path = _ustx
-            wav_path = _wav
-            break
-    if dali_id is not None:
-        break
+            valid_samples.append((_did, _cn, _ustx, _wav))
 
-if dali_id is None:
-    raise RuntimeError("No valid DALI USTX sample found")
+if not valid_samples:
+    raise RuntimeError("No valid DALI USTX samples found")
+
+print(f"Found {len(valid_samples)} valid samples. Picking with seed={RANDOM_SEED}...")
+rng = random.Random(RANDOM_SEED)
+dali_id, chunk_name, ustx_path, wav_path = rng.choice(valid_samples)
 
 print(f"Selected: {dali_id} / {chunk_name}")
 print(f"  USTX: {ustx_path}")
@@ -285,20 +284,21 @@ t = np.arange(T) * HOP / SR
 fig, ax = plt.subplots(figsize=(14, 5))
 
 ax.plot(t, f0_for_plot(dali_f0), label="DALI GT F0",
-        color="tab:green", linewidth=2, alpha=0.8)
+        color="#f0b27a", linewidth=2, alpha=1)
 
 if soulx_f0 is not None:
     sx_aligned = align_f0(soulx_f0, T)
-    ax.plot(t, f0_for_plot(sx_aligned), label="SoulX target F0",
-            color="tab:blue", linewidth=1.5, alpha=0.7)
+    ax.plot(t, f0_for_plot(sx_aligned), label="SoulX-Singer target F0",
+            color="#76d7c4", linewidth=1.5, alpha=1)
 
 vf_aligned = align_f0(vf_f0, T)
 ax.plot(t, f0_for_plot(vf_aligned), label="VocaloFlow F0 (RMVPE)",
-        color="tab:red", linewidth=1.5, alpha=0.7)
+        color="#e06666ff", linewidth=1.5, alpha=0.8)
 
 ax.set_xlabel("Time (s)")
 ax.set_ylabel("F0 (Hz)")
-ax.set_title(f"F0 Comparison: {dali_id} / {chunk_name}")
+# ax.set_title(f"F0 Comparison: {dali_id} / {chunk_name}")
+ax.set_title(f"F0 Controllability Comparison")
 ax.legend(loc="upper right")
 ax.grid(True, alpha=0.3)
 plt.tight_layout()

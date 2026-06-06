@@ -23,6 +23,16 @@ python run_inference.py \
     --max-eval-chunks 50
 ```
 
+### Step 1b: Pre-generate RVC baseline audio from DALI priors (one-time, for Context 2)
+
+```bash
+cd RVCBaseline
+python run_inference.py 
+    --rvc-model-path "../Applio/logs/Rachie-RVC/Rachie-RVC_170e_47260s_best_epoch.pth" 
+    --mode controllability 
+    --max-eval-chunks 50
+```
+
 ### Step 2: Pre-generate DALI USTX priors (one-time, needs pythonnet)
 
 Creates USTX + prior WAV from DALI MIDI annotations for controllability eval. Run from `Evaluation/` in the datasynthesizer env:
@@ -41,10 +51,11 @@ Run from `Evaluation/` in the eval env:
 conda activate vocaloflow-eval
 cd Evaluation
 
-# Both contexts (quality + controllability) with RVC baseline
+# Both contexts (quality + controllability) with RVC baselines
 python run_eval.py 
     --checkpoint ../VocaloFlow/checkpoints/4-27-wn/checkpoint_150000.pt 
     --rvc-audio-dir ../RVCBaseline/output 
+    --rvc-dali-audio-dir ../RVCBaseline/output_dali 
     --eval-context both 
     --max-eval-chunks 50
 
@@ -97,7 +108,8 @@ Evaluation/
 
 - `checkpoint_path`: VocaloFlow checkpoint .pt file
 - `eval_context`: `"quality"`, `"controllability"`, or `"both"`
-- `rvc_audio_dir`: Directory of pre-generated RVC audio (CLI: `--rvc-audio-dir`). Files named `{dali_id}_{chunk_name}.wav`.
+- `rvc_audio_dir`: Directory of pre-generated RVC audio for Context 1 (CLI: `--rvc-audio-dir`). Files named `{dali_id}_{chunk_name}.wav`.
+- `rvc_dali_audio_dir`: Directory of pre-generated RVC audio from DALI priors for Context 2 (CLI: `--rvc-dali-audio-dir`). Same naming convention. Empty = disabled.
 - `dali_ustx_dir`: Directory with pre-generated DALI USTX priors (CLI: `--dali-ustx-dir`). Default `./dali_ustx`.
 - `enable_*` toggles: Each metric independently activatable
 - `max_eval_chunks`: Cap on validation set size (0 = all)
@@ -216,6 +228,7 @@ Main orchestrator. Processing flow per chunk:
 7. Compute all enabled metrics (incl. `wer_teto` for Teto prior intelligibility floor)
 8. RVC baseline metrics (if `--rvc-audio-dir` provided): load RVC audio, extract F0, compute `rvc_f0_rmse`, `rvc_f0_pearson`, `rvc_gpe/vde/ffe`, `rvc_mcd` (via `audio_to_mel()`), `rvc_wer`, `rvc_mos`
 9. Context 2 (controllability): Load pre-generated DALI USTX + prior WAV → parse USTX → extract conditioning (F0 from note pitches, not SoulX) → VF inference → compare output F0 vs DALI reference. Uses `_eval_controllability()` which lazy-loads `pipeline.py` functions. Also includes SX metrics (`sx_*`) for side-by-side comparison. Requires pre-generated USTX via `generate_dali_ustx.py`.
+10. Context 2 RVC baseline (if `--rvc-dali-audio-dir` provided): load RVC audio (converted from DALI prior), extract F0, compute `rvc_f0_rmse`, `rvc_f0_pearson`, `rvc_gpe/vde/ffe`, `rvc_onset_mae` — all vs DALI ground-truth F0. Tests whether RVC voice conversion preserves the DALI pitch contour.
 
 Outputs per-sample CSV, summary CSV, and config YAML to `output_dir/`.
 

@@ -37,6 +37,11 @@ class RVCBaselineConfig:
     index_ratio: float = 0.0
     f0_shift: int = 0
 
+    # -- DALI prior inference (Context 2) ---------------------------------
+    mode: str = "quality"
+    dali_ustx_dir: str = "../Evaluation/dali_ustx"
+    dali_output_dir: str = "./output_dali"
+
     # -- Model paths (populated after training) ----------------------------
     rvc_model_path: str = ""
     rvc_index_path: str = ""

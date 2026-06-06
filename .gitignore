@@ -41,10 +41,15 @@ demo/
 Applio/
 RVCBaseline/output/
 RVCBaseline/training_data/
+RVCBaseline/output_dali
 
 # Eval precompute
 Evaluation/scratch_output
 Evaluation/dali_ustx
+
+# Eval test plots
+Evaluation/plots/f0_comparison_output
+Evaluation/plots/mel_delta_grid_output/_cache
 
 # other
 wandb.txt

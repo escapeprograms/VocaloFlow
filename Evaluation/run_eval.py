@@ -443,6 +443,7 @@ def _eval_controllability(
     config: EvalConfig,
     device: torch.device,
     speaker_emb: torch.Tensor | None,
+    rvc_dali_audio_path: str | None = None,
 ) -> dict | None:
     """Run Context 2 (controllability) evaluation for a single chunk.
 
@@ -563,15 +564,37 @@ def _eval_controllability(
     results["sx_vde"] = gvf_sx["vde"]
     results["sx_ffe"] = gvf_sx["ffe"]
 
-    # ── Onset MAE ────────────────────────────────────────────────────
+    # ── Onset reference (shared by VF, SX, and RVC) ─────────────────
+    dali_onsets = np.array([], dtype=np.float32)
     if config.enable_duration_mae:
         dali_notes = extract_dali_note_timings(dali_entry, chunk_start, chunk_end)
         dali_onsets = dur_mod.extract_dali_onset_times(dali_notes)
-        if len(dali_onsets) > 0:
-            vf_onsets = dur_mod.detect_note_onsets(pred_f0, config.sr, config.hop)
-            results["vf_onset_mae"] = dur_mod.compute_onset_mae(vf_onsets, dali_onsets)
-            sx_onsets = dur_mod.detect_note_onsets(target_f0, config.sr, config.hop)
-            results["sx_onset_mae"] = dur_mod.compute_onset_mae(sx_onsets, dali_onsets)
+
+    # ── Onset MAE (VF + SX) ──────────────────────────────────────────
+    if config.enable_duration_mae and len(dali_onsets) > 0:
+        vf_onsets = dur_mod.detect_note_onsets(pred_f0, config.sr, config.hop)
+        results["vf_onset_mae"] = dur_mod.compute_onset_mae(vf_onsets, dali_onsets)
+        sx_onsets = dur_mod.detect_note_onsets(target_f0, config.sr, config.hop)
+        results["sx_onset_mae"] = dur_mod.compute_onset_mae(sx_onsets, dali_onsets)
+
+    # ── RVC baseline: DALI prior → RVC → F0 vs DALI ────────────────
+    if rvc_dali_audio_path and os.path.exists(rvc_dali_audio_path):
+        import librosa
+        rvc_audio, _ = librosa.load(rvc_dali_audio_path, sr=config.sr)
+        rvc_f0 = extract_f0(
+            rvc_audio, config.rmvpe_model_path, str(device), config.sr, config.hop,
+        )
+
+        results["rvc_f0_rmse"] = f0_mod.f0_rmse(rvc_f0, dali_f0)
+        results["rvc_f0_pearson"] = f0_mod.f0_pearson(rvc_f0, dali_f0)
+        rvc_gvf = f0_mod.compute_gpe_vde_ffe(rvc_f0, dali_f0)
+        results["rvc_gpe"] = rvc_gvf["gpe"]
+        results["rvc_vde"] = rvc_gvf["vde"]
+        results["rvc_ffe"] = rvc_gvf["ffe"]
+
+        if config.enable_duration_mae and len(dali_onsets) > 0:
+            rvc_onsets = dur_mod.detect_note_onsets(rvc_f0, config.sr, config.hop)
+            results["rvc_onset_mae"] = dur_mod.compute_onset_mae(rvc_onsets, dali_onsets)
 
     return results
 
@@ -640,6 +663,8 @@ def _parse_args() -> EvalConfig:
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--whisper-model", type=str, default=None)
     parser.add_argument("--rvc-audio-dir", type=str, default=None)
+    parser.add_argument("--rvc-dali-audio-dir", type=str, default=None,
+                        help="Directory with pre-generated RVC audio from DALI priors (Context 2)")
     parser.add_argument("--dali-ustx-dir", type=str, default=None,
                         help="Directory with pre-generated DALI USTX priors")
 
@@ -677,6 +702,8 @@ def _parse_args() -> EvalConfig:
         config.whisper_model = args.whisper_model
     if args.rvc_audio_dir:
         config.rvc_audio_dir = args.rvc_audio_dir
+    if args.rvc_dali_audio_dir:
+        config.rvc_dali_audio_dir = args.rvc_dali_audio_dir
     if args.dali_ustx_dir:
         config.dali_ustx_dir = args.dali_ustx_dir
 
@@ -777,9 +804,16 @@ def main() -> None:
 
         # Context 2: Controllability (DALI-path USTX priors)
         if run_controllability:
+            rvc_dali_path = None
+            if config.rvc_dali_audio_dir:
+                candidate = os.path.join(config.rvc_dali_audio_dir, f"{dali_id}_{chunk_name}.wav")
+                if os.path.exists(candidate):
+                    rvc_dali_path = candidate
+
             try:
                 c = _eval_controllability(
                     dali_id, chunk_name, arrays, model, config, device, speaker_emb,
+                    rvc_dali_audio_path=rvc_dali_path,
                 )
                 if c is not None:
                     c["dali_id"] = dali_id

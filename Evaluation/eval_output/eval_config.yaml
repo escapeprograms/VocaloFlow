@@ -8,6 +8,7 @@ val_fraction: 0.05
 seed: 42
 max_eval_chunks: 50
 rvc_audio_dir: ../RVCBaseline/output
+rvc_dali_audio_dir: ../RVCBaseline/output_dali
 num_ode_steps: 16
 ode_method: midpoint
 cfg_scale: 1.0
@@ -21,7 +22,7 @@ enable_wer: true
 enable_mos: true
 enable_duration_mae: true
 enable_contentvec: false
-eval_context: both
+eval_context: controllability
 dali_ustx_dir: ./dali_ustx
 rmvpe_model_path: ../SoulX-Singer/pretrained_models/SoulX-Singer-Preprocess/rmvpe/rmvpe.pt
 phoneset_path: ../SoulX-Singer/soulxsinger/utils/phoneme/phone_set.json

@@ -25,6 +25,7 @@ class EvalConfig:
 
     # -- RVC baseline (pre-generated audio) --------------------------------
     rvc_audio_dir: str = ""
+    rvc_dali_audio_dir: str = ""
 
     # -- Inference ---------------------------------------------------------
     num_ode_steps: int = 16

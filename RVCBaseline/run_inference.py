@@ -113,6 +113,11 @@ def _parse_args() -> RVCBaselineConfig:
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--f0-shift", type=int, default=None)
     parser.add_argument("--index-ratio", type=float, default=None)
+    parser.add_argument("--mode", type=str, default=None,
+                        choices=["quality", "controllability"],
+                        help="quality: convert prior.wav; controllability: convert dali_prior.wav")
+    parser.add_argument("--dali-ustx-dir", type=str, default=None)
+    parser.add_argument("--dali-output-dir", type=str, default=None)
 
     args = parser.parse_args()
 
@@ -136,6 +141,12 @@ def _parse_args() -> RVCBaselineConfig:
         config.f0_shift = args.f0_shift
     if args.index_ratio is not None:
         config.index_ratio = args.index_ratio
+    if args.mode:
+        config.mode = args.mode
+    if args.dali_ustx_dir:
+        config.dali_ustx_dir = args.dali_ustx_dir
+    if args.dali_output_dir:
+        config.dali_output_dir = args.dali_output_dir
 
     return config
 
@@ -169,16 +180,17 @@ def main() -> None:
         config.max_eval_chunks,
     )
 
-    os.makedirs(config.output_dir, exist_ok=True)
+    actual_output_dir = config.dali_output_dir if config.mode == "controllability" else config.output_dir
+    os.makedirs(actual_output_dir, exist_ok=True)
 
     total = len(val_df)
     succeeded = 0
     failed = 0
     skipped = 0
 
-    print(f"[{timestamp()}] Processing {total} chunks")
+    print(f"[{timestamp()}] Processing {total} chunks (mode={config.mode})")
     print(f"[{timestamp()}] Model: {config.rvc_model_path}")
-    print(f"[{timestamp()}] Output: {os.path.abspath(config.output_dir)}")
+    print(f"[{timestamp()}] Output: {os.path.abspath(actual_output_dir)}")
     print(f"[{timestamp()}] F0 shift: {config.f0_shift}, Index ratio: {config.index_ratio}")
     print()
 
@@ -186,11 +198,16 @@ def main() -> None:
         dali_id = row["dali_id"]
         chunk_name = row["chunk_name"]
 
-        input_path = os.path.join(config.data_dir, dali_id, chunk_name, "prior.wav")
-        output_path = os.path.join(config.output_dir, f"{dali_id}_{chunk_name}.wav")
+        if config.mode == "controllability":
+            input_path = os.path.join(config.dali_ustx_dir, dali_id, chunk_name, "dali_prior.wav")
+            output_path = os.path.join(config.dali_output_dir, f"{dali_id}_{chunk_name}.wav")
+        else:
+            input_path = os.path.join(config.data_dir, dali_id, chunk_name, "prior.wav")
+            output_path = os.path.join(config.output_dir, f"{dali_id}_{chunk_name}.wav")
 
         if not os.path.exists(input_path):
-            print(f"  [{i+1}/{total}] SKIP (no prior.wav): {dali_id}/{chunk_name}")
+            wav_name = "dali_prior.wav" if config.mode == "controllability" else "prior.wav"
+            print(f"  [{i+1}/{total}] SKIP (no {wav_name}): {dali_id}/{chunk_name}")
             skipped += 1
             continue
 
@@ -208,7 +225,7 @@ def main() -> None:
             print(f"  [{i+1}/{total}] FAILED: {dali_id}/{chunk_name} — {e}")
 
     print(f"\n[{timestamp()}] Done. Succeeded: {succeeded}, Failed: {failed}, Skipped: {skipped}")
-    print(f"[{timestamp()}] Output directory: {os.path.abspath(config.output_dir)}")
+    print(f"[{timestamp()}] Output directory: {os.path.abspath(actual_output_dir)}")
 
 
 if __name__ == "__main__":

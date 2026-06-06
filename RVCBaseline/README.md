@@ -1,6 +1,6 @@
 # RVCBaseline — Memory Palace
 
-RVC (Retrieval-based Voice Conversion) baseline for VocaloFlow evaluation. Uses Applio (RVC fork) to fine-tune on Rachie vocal data and run inference on Teto prior audio. The thesis argument: ContentVec cannot extract meaningful content from synthetic Vocaloid singing, so RVC fails where VocaloFlow succeeds.
+RVC (Retrieval-based Voice Conversion) baseline for VocaloFlow evaluation. Uses Applio (RVC fork) to fine-tune on Rachie vocal data and run inference on prior audio. Supports two modes: **quality** (Context 1, converts Teto `prior.wav`) and **controllability** (Context 2, converts DALI `dali_prior.wav`). The thesis argument: ContentVec cannot extract meaningful content from synthetic Vocaloid singing, so RVC fails where VocaloFlow succeeds.
 
 ## Quick Start
 
@@ -13,15 +13,20 @@ python prepare_training_data.py --config configs/default.yaml
 # 2. Train (3-step pipeline: preprocess -> extract -> train)
 python run_training.py --config configs/default.yaml
 
-# 3. Run inference on eval set
+# 3a. Run inference on eval set (Context 1: quality)
 python run_inference.py --rvc-model-path <path/to/model.pth> --max-eval-chunks 50
 
 #use this one
 python run_inference.py --rvc-model-path "../Applio/logs/Rachie-RVC/Rachie-RVC_170e_47260s_best_epoch.pth" --max-eval-chunks 50
 
+# 3b. Run inference on DALI priors (Context 2: controllability)
+python run_inference.py --rvc-model-path "../Applio/logs/Rachie-RVC/Rachie-RVC_170e_47260s_best_epoch.pth" \
+    --mode controllability --max-eval-chunks 50
+
 # 4. Evaluate (from Evaluation/)
 cd ../Evaluation
-python run_eval.py --checkpoint <vf_checkpoint> --rvc-audio-dir ../RVCBaseline/output
+python run_eval.py --checkpoint <vf_checkpoint> --rvc-audio-dir ../RVCBaseline/output \
+    --rvc-dali-audio-dir ../RVCBaseline/output_dali --eval-context both
 ```
 
 ## Directory Layout
@@ -90,23 +95,28 @@ Output model lands in `../Applio/logs/{model_name}/`.
 
 ### run_inference.py
 
-Runs RVC voice conversion on val-set prior.wav files. Produces output files with the exact naming convention the eval pipeline expects: `{dali_id}_{chunk_name}.wav`.
+Runs RVC voice conversion on val-set audio files. Produces output files with the exact naming convention the eval pipeline expects: `{dali_id}_{chunk_name}.wav`.
 
+- Supports two modes via `--mode`:
+  - `quality` (default): Converts `data_dir/{dali_id}/{chunk_name}/prior.wav` → `output/{dali_id}_{chunk_name}.wav`
+  - `controllability`: Converts `dali_ustx_dir/{dali_id}/{chunk_name}/dali_prior.wav` → `output_dali/{dali_id}_{chunk_name}.wav`
 - Imports `get_val_manifest` from `Evaluation/eval_utils/val_set.py` to select the same chunks as eval
 - Calls Applio CLI `infer` per file via subprocess
 - Skips chunks where output already exists (resumable)
 - Logs per-chunk success/failure, continues on errors
 
-CLI flags: `--config`, `--rvc-model-path`, `--rvc-index-path`, `--data-dir`, `--manifest`, `--max-eval-chunks`, `--output-dir`, `--f0-shift`, `--index-ratio`
+CLI flags: `--config`, `--rvc-model-path`, `--rvc-index-path`, `--data-dir`, `--manifest`, `--max-eval-chunks`, `--output-dir`, `--f0-shift`, `--index-ratio`, `--mode`, `--dali-ustx-dir`, `--dali-output-dir`
 
 ## Eval Pipeline Integration
 
 The eval pipeline (`Evaluation/run_eval.py`) already supports RVC via:
 
-- `EvalConfig.rvc_audio_dir` — directory containing RVC output WAVs
-- CLI flag: `--rvc-audio-dir`
+- `EvalConfig.rvc_audio_dir` — directory containing RVC output WAVs (Context 1)
+- `EvalConfig.rvc_dali_audio_dir` — directory containing RVC output WAVs from DALI priors (Context 2)
+- CLI flags: `--rvc-audio-dir`, `--rvc-dali-audio-dir`
 - File naming: `{dali_id}_{chunk_name}.wav`
-- Metrics computed: `rvc_f0_rmse`, `rvc_wer`, `rvc_mos`
+- Context 1 metrics: `rvc_f0_rmse`, `rvc_f0_pearson`, `rvc_gpe/vde/ffe`, `rvc_mcd`, `rvc_wer`, `rvc_mos`
+- Context 2 metrics: `rvc_f0_rmse`, `rvc_f0_pearson`, `rvc_gpe/vde/ffe`, `rvc_onset_mae` (all vs DALI F0)
 - Audio auto-resampled to 24kHz via `librosa.load(sr=24000)`
 
 ## Configuration Reference
@@ -128,5 +138,8 @@ The eval pipeline (`Evaluation/run_eval.py`) already supports RVC via:
 | `output_dir` | `./output` | Inference output dir |
 | `index_ratio` | `0.0` | Retrieval index influence |
 | `f0_shift` | `0` | Pitch shift in semitones |
+| `mode` | `quality` | `quality` or `controllability` |
+| `dali_ustx_dir` | `../Evaluation/dali_ustx` | DALI USTX prior directory |
+| `dali_output_dir` | `./output_dali` | Output dir for controllability mode |
 | `rvc_model_path` | `""` | Trained model .pth path |
 | `rvc_index_path` | `""` | FAISS index path |
